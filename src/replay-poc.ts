@@ -187,6 +187,17 @@ function isInputNode(node: TaroReplayNodeLike): boolean {
   return nodeName === 'input' || nodeName === 'textarea';
 }
 
+function sanitizeAttributeValue(
+  node: TaroReplayNodeLike,
+  name: string,
+  value: unknown,
+  maskInputValues: boolean,
+): string | number | true | null {
+  const safeValue =
+    maskInputValues && isInputNode(node) && name === 'value' ? maskValue(value) : value;
+  return primitiveAttributeValue(safeValue);
+}
+
 function cloneCapture(capture: TaroReplayPocCapture): TaroReplayPocCapture {
   return {
     ...capture,
@@ -267,11 +278,12 @@ export function startTaroDomReplayPoc(
 
     for (const attribute of toArray(node.attributes)) {
       if (!attribute || !attribute.name || /^on/i.test(attribute.name)) continue;
-      const value =
-        maskInputValues && isInputNode(node) && attribute.name === 'value'
-          ? maskValue(attribute.value)
-          : attribute.value;
-      result[attribute.name] = primitiveAttributeValue(value);
+      result[attribute.name] = sanitizeAttributeValue(
+        node,
+        attribute.name,
+        attribute.value,
+        maskInputValues,
+      );
     }
 
     return result;
@@ -371,12 +383,14 @@ export function startTaroDomReplayPoc(
     node: TaroReplayNodeLike,
     attributeName: string,
   ): string | number | true | null {
-    if (node.hasAttribute && !node.hasAttribute(attributeName)) return null;
-    const raw = node.getAttribute ? node.getAttribute(attributeName) : null;
-    if (maskInputValues && isInputNode(node) && attributeName === 'value') {
-      return maskValue(raw);
+    // Taro keeps inline styles in Style.cssText rather than Element.props, so
+    // hasAttribute('style') is false even while getAttribute('style') is valid.
+    if (attributeName !== 'style' && node.hasAttribute && !node.hasAttribute(attributeName)) {
+      return null;
     }
-    return primitiveAttributeValue(raw);
+    const raw = node.getAttribute ? node.getAttribute(attributeName) : null;
+    if (attributeName === 'style' && (raw === null || raw === undefined || raw === '')) return null;
+    return sanitizeAttributeValue(node, attributeName, raw, maskInputValues);
   }
 
   function handleMutations(records: TaroReplayMutationRecordLike[]): void {
@@ -444,6 +458,11 @@ export function startTaroDomReplayPoc(
     return result;
   }
 
+  const controller: TaroDomReplayPocController = {
+    getCapture: () => cloneCapture(capture),
+    stop,
+  };
+
   addEvent({
     type: RrwebEventType.Meta,
     timestamp: nextTimestamp(startedAt),
@@ -463,6 +482,10 @@ export function startTaroDomReplayPoc(
   });
 
   capture.warnings = Array.from(warnings);
+  // A very small maxEvents/maxBytes can stop while the initial snapshot is
+  // being appended. Do not create live resources after that terminal state.
+  if (stopped) return controller;
+
   resources.observer = new options.MutationObserver(handleMutations);
   resources.observer.observe(options.root, {
     attributes: true,
@@ -472,8 +495,5 @@ export function startTaroDomReplayPoc(
   });
   resources.timer = setTimeout(() => stop('duration'), maxDurationMs);
 
-  return {
-    getCapture: () => cloneCapture(capture),
-    stop,
-  };
+  return controller;
 }
