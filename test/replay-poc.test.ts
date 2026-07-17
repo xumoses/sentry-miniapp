@@ -126,6 +126,7 @@ describe('Taro DOM Replay POC', () => {
     });
 
     const initial = controller.getCapture();
+    expect(initial.href).toBe('https://miniapp.local/replay-poc');
     expect(initial.events.map((event) => event.type)).toEqual([4, 2]);
     expect(initial.events.map((event) => event.timestamp)).toEqual([1_000, 1_001]);
     expect(
@@ -149,6 +150,97 @@ describe('Taro DOM Replay POC', () => {
     expect(capture.stats.mutationCount).toBe(1);
     expect(capture.stopReason).toBe('manual');
     expect(observer.current()?.disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('records Sentry breadcrumbs and network summaries as Replay custom events', () => {
+    const observer = observerHarness();
+    const controller = startTaroDomReplayPoc({
+      root: element('view', 'root-1'),
+      MutationObserver: observer.MutationObserver,
+      now: () => 4_000,
+    });
+
+    expect(
+      controller.addBreadcrumb({
+        timestamp: 4,
+        category: 'user.interaction',
+        message: 'Increment counter',
+        data: { action: 'increment', page: 'pages/ReplayPoc/index' },
+      }),
+    ).toBe(true);
+    expect(
+      controller.addBreadcrumb({
+        timestamp: 4.1,
+        category: 'xhr',
+        data: {
+          url: 'http://127.0.0.1:4318/health',
+          method: 'GET',
+          status_code: 200,
+          duration: 25,
+          request_size: 12,
+          response_size: 16,
+        },
+      }),
+    ).toBe(true);
+
+    const capture = controller.getCapture();
+    expect(capture.events[2]).toEqual(
+      expect.objectContaining({
+        type: 5,
+        data: {
+          tag: 'breadcrumb',
+          payload: expect.objectContaining({
+            category: 'user.interaction',
+            message: 'Increment counter',
+          }),
+        },
+      }),
+    );
+    expect(capture.events[3]).toEqual(
+      expect.objectContaining({
+        type: 5,
+        data: {
+          tag: 'performanceSpan',
+          payload: expect.objectContaining({
+            op: 'resource.xhr',
+            description: 'http://127.0.0.1:4318/health',
+            data: expect.objectContaining({ method: 'GET', statusCode: 200 }),
+          }),
+        },
+      }),
+    );
+    expect(capture.stats.breadcrumbCount).toBe(1);
+    expect(capture.stats.networkCount).toBe(1);
+
+    controller.stop();
+    expect(controller.addBreadcrumb({ category: 'user.interaction' })).toBe(false);
+  });
+
+  it('includes caller-provided Sentry metadata in the capture', () => {
+    const observer = observerHarness();
+    const controller = startTaroDomReplayPoc({
+      root: element('view', 'root-1'),
+      MutationObserver: observer.MutationObserver,
+      metadata: {
+        environment: 'develop',
+        release: 'derivative-manager-test',
+        sdk: { name: 'sentry.javascript.miniapp', version: '1.13.1' },
+        user: { id: 'replay-poc-user' },
+        tags: { framework: 'taro', 'miniapp.platform': 'wechat' },
+        contexts: { miniapp: { route: 'pages/ReplayPoc/index' } },
+      },
+      now: () => 5_000,
+    });
+
+    expect(controller.getCapture().metadata).toEqual({
+      environment: 'develop',
+      release: 'derivative-manager-test',
+      sdk: { name: 'sentry.javascript.miniapp', version: '1.13.1' },
+      user: { id: 'replay-poc-user' },
+      tags: { framework: 'taro', 'miniapp.platform': 'wechat' },
+      contexts: { miniapp: { route: 'pages/ReplayPoc/index' } },
+    });
+    controller.stop();
   });
 
   it('records style and child mutations while masking initial and changed input values', () => {

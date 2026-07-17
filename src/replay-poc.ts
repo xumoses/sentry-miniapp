@@ -9,12 +9,15 @@
  * has been evaluated in a real mini program.
  */
 
+import type { Breadcrumb } from '@sentry/core';
+
 export const TARO_DOM_REPLAY_POC_MARKER = 'TARO_DOM_REPLAY_POC';
 
 const enum RrwebEventType {
   FullSnapshot = 2,
   IncrementalSnapshot = 3,
   Meta = 4,
+  Custom = 5,
 }
 
 const enum RrwebNodeType {
@@ -96,6 +99,18 @@ export interface TaroReplayPocEvent {
   data: Record<string, unknown>;
 }
 
+export interface TaroReplayPocMetadata {
+  environment?: string;
+  release?: string;
+  sdk?: {
+    name: string;
+    version: string;
+  };
+  user?: Record<string, unknown>;
+  tags?: Record<string, string | number | boolean>;
+  contexts?: Record<string, Record<string, unknown>>;
+}
+
 export interface TaroReplayPocCapture {
   marker: typeof TARO_DOM_REPLAY_POC_MARKER;
   version: 1;
@@ -105,9 +120,12 @@ export interface TaroReplayPocCapture {
   endedAt: number | null;
   stopReason: string | null;
   events: TaroReplayPocEvent[];
+  metadata: TaroReplayPocMetadata | undefined;
   stats: {
     eventCount: number;
     mutationCount: number;
+    breadcrumbCount: number;
+    networkCount: number;
     approximateBytes: number;
   };
   warnings: string[];
@@ -123,12 +141,14 @@ export interface StartTaroDomReplayPocOptions {
   maxDurationMs?: number;
   maxEvents?: number;
   maxBytes?: number;
+  metadata?: TaroReplayPocMetadata;
   now?: () => number;
   onEvent?: (event: TaroReplayPocEvent) => void;
   onStop?: (capture: TaroReplayPocCapture) => void;
 }
 
 export interface TaroDomReplayPocController {
+  addBreadcrumb(breadcrumb: Breadcrumb): boolean;
   getCapture(): TaroReplayPocCapture;
   stop(reason?: string): TaroReplayPocCapture;
 }
@@ -202,6 +222,17 @@ function cloneCapture(capture: TaroReplayPocCapture): TaroReplayPocCapture {
   return {
     ...capture,
     events: capture.events.slice(),
+    metadata: capture.metadata
+      ? {
+          ...capture.metadata,
+          ...(capture.metadata.sdk ? { sdk: { ...capture.metadata.sdk } } : {}),
+          ...(capture.metadata.user ? { user: { ...capture.metadata.user } } : {}),
+          ...(capture.metadata.tags ? { tags: { ...capture.metadata.tags } } : {}),
+          ...(capture.metadata.contexts
+            ? { contexts: JSON.parse(JSON.stringify(capture.metadata.contexts)) }
+            : {}),
+        }
+      : undefined,
     stats: { ...capture.stats },
     warnings: capture.warnings.slice(),
   };
@@ -240,14 +271,17 @@ export function startTaroDomReplayPoc(
     marker: TARO_DOM_REPLAY_POC_MARKER,
     version: 1,
     replayId: makeReplayId(startedAt),
-    href: options.href || 'taro://replay-poc',
+    href: options.href || 'https://miniapp.local/replay-poc',
     startedAt,
     endedAt: null,
     stopReason: null,
     events: [],
+    metadata: options.metadata,
     stats: {
       eventCount: 0,
       mutationCount: 0,
+      breadcrumbCount: 0,
+      networkCount: 0,
       approximateBytes: 0,
     },
     warnings: [],
@@ -379,6 +413,79 @@ export function startTaroDomReplayPoc(
     return lastEventTimestamp;
   }
 
+  function breadcrumbTimestampMs(breadcrumb: Breadcrumb): number {
+    const timestamp = breadcrumb.timestamp;
+    if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) return now();
+    return timestamp > 9_999_999_999 ? timestamp : timestamp * 1_000;
+  }
+
+  function finiteNumber(value: unknown): number | undefined {
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  }
+
+  function networkRequestOrResponse(size: unknown): Record<string, unknown> {
+    const byteSize = finiteNumber(size);
+    return {
+      headers: {},
+      ...(byteSize === undefined ? {} : { size: byteSize }),
+      _meta: { warnings: ['URL_SKIPPED'] },
+    };
+  }
+
+  function addBreadcrumb(breadcrumb: Breadcrumb): boolean {
+    if (stopped || !breadcrumb || typeof breadcrumb.category !== 'string') return false;
+
+    const timestampMs = breadcrumbTimestampMs(breadcrumb);
+    const data = breadcrumb.data || {};
+    const isNetwork =
+      (breadcrumb.category === 'xhr' || breadcrumb.category === 'fetch') &&
+      typeof data['url'] === 'string';
+    let event: TaroReplayPocEvent;
+
+    if (isNetwork) {
+      const endTimestamp = timestampMs / 1_000;
+      const duration = finiteNumber(data['duration']) ?? 0;
+      event = {
+        type: RrwebEventType.Custom,
+        timestamp: nextTimestamp(timestampMs),
+        data: {
+          tag: 'performanceSpan',
+          payload: {
+            op: `resource.${breadcrumb.category}`,
+            description: data['url'],
+            startTimestamp: Math.max(0, endTimestamp - duration / 1_000),
+            endTimestamp,
+            data: {
+              method: typeof data['method'] === 'string' ? data['method'] : 'GET',
+              statusCode: finiteNumber(data['status_code']) ?? 0,
+              request: networkRequestOrResponse(data['request_body_size'] ?? data['request_size']),
+              response: networkRequestOrResponse(
+                data['response_body_size'] ?? data['response_size'],
+              ),
+            },
+          },
+        },
+      };
+    } else {
+      event = {
+        type: RrwebEventType.Custom,
+        timestamp: nextTimestamp(timestampMs),
+        data: {
+          tag: 'breadcrumb',
+          payload: {
+            ...breadcrumb,
+            timestamp: timestampMs / 1_000,
+          },
+        },
+      };
+    }
+
+    if (!addEvent(event)) return false;
+    if (isNetwork) capture.stats.networkCount++;
+    else capture.stats.breadcrumbCount++;
+    return true;
+  }
+
   function currentAttributeValue(
     node: TaroReplayNodeLike,
     attributeName: string,
@@ -459,6 +566,7 @@ export function startTaroDomReplayPoc(
   }
 
   const controller: TaroDomReplayPocController = {
+    addBreadcrumb,
     getCapture: () => cloneCapture(capture),
     stop,
   };

@@ -99,6 +99,7 @@ export {
   type TaroReplayNodeLike,
   type TaroReplayPocCapture,
   type TaroReplayPocEvent,
+  type TaroReplayPocMetadata,
 } from './replay-poc';
 
 // Export Session utility functions from @sentry/core
