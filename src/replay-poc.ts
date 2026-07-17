@@ -242,6 +242,7 @@ function utf8ByteLength(value: string): number {
       bytes += 2;
     } else if (code >= 0xd800 && code <= 0xdbff) {
       const next = value.charCodeAt(index + 1);
+      /* istanbul ignore else -- JSON.stringify escapes unpaired UTF-16 surrogates. */
       if (next >= 0xdc00 && next <= 0xdfff) {
         bytes += 4;
         index++;

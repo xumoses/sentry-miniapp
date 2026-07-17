@@ -337,6 +337,40 @@ describe('Taro DOM Replay POC', () => {
     controller.stop();
   });
 
+  it('removes data URL payloads and counts two-byte UTF-8 characters', () => {
+    const observer = observerHarness();
+    const imageWithMime = element('image', 'image-mime', {
+      src: 'data:image/png;base64,private',
+    });
+    const imageWithoutMime = element('image', 'image-default', { src: 'data:,private' });
+    const controller = startTaroDomReplayPoc({
+      root: element('view', 'root-1', {}, [
+        textNode('é', 'text-1'),
+        imageWithMime,
+        imageWithoutMime,
+      ]),
+      MutationObserver: observer.MutationObserver,
+      maskAllText: false,
+      now: () => 2_450,
+    });
+
+    const capture = controller.getCapture();
+    const snapshot = fullSnapshotNode(capture.events);
+    expect(
+      findNode(snapshot, (node) => node.attributes?.['src'] === 'data:image/png'),
+    ).toBeDefined();
+    expect(
+      findNode(snapshot, (node) => node.attributes?.['src'] === 'data:text/plain'),
+    ).toBeDefined();
+    expect(capture.stats.approximateBytes).toBe(
+      capture.events.reduce(
+        (total, event) => total + Buffer.byteLength(JSON.stringify(event), 'utf8'),
+        0,
+      ),
+    );
+    controller.stop();
+  });
+
   it('uses object ids for sid-less nodes and records attribute and child removal fallbacks', () => {
     const observer = observerHarness();
     const removed = textNode('remove me', 'removed-1');

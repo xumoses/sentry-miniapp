@@ -57,7 +57,7 @@ class SentryBoundary extends React.Component {
 
 原生小程序和小游戏仍然**不支持 DOM Replay**：它们没有可供 rrweb 录制的浏览器 DOM。Taro 4.2 例外——其逻辑层维护可遍历的虚拟 DOM，并可显式开启 `MutationObserver`，因此本仓库提供了一个需手动接入的实验性 Taro DOM recorder。
 
-该 recorder 不属于默认 integrations，不会在微信、支付宝、字节、钉钉、QQ、百度或快手运行时自动启动；当前仅验证 Taro React + 微信。它也不承诺 Canvas、WebView、原生组件或 WXSS 的像素级还原。生产使用前仍需通过独立 Replay 包配置严格脱敏、采样、分段与发送策略。原生页面请继续依靠**丰富的面包屑路径**和自定义日志还原现场。
+该 recorder 不属于默认 integrations，不会在微信、支付宝、字节、钉钉、QQ、百度或快手运行时自动启动；当前仅验证 Taro React + 微信。它也不承诺 Canvas、WebView、原生组件或 WXSS 的像素级还原。独立 Replay 包目前只负责严格脱敏与单段发送；采样、多段会话和错误前缓冲仍需后续实现。原生页面请继续依靠**丰富的面包屑路径**和自定义日志还原现场。
 
 实验边界与事件格式见 [Taro DOM Replay 说明](https://github.com/lizhiyao/sentry-miniapp/blob/master/docs/taro-dom-replay-poc.md)。
 
