@@ -8,14 +8,14 @@ disable-model-invocation: false
 
 # Sentry Mini Program SDK Setup
 
-Set up Sentry error monitoring, performance tracing, and offline caching in mini program projects using [`sentry-miniapp`](https://github.com/lizhiyao/sentry-miniapp) — a community SDK built on `@sentry/core` v10.
+Set up Sentry error monitoring, performance tracing, and offline caching in mini program projects using [`@xumoses/sentry-mini`](https://www.npmjs.com/package/@xumoses/sentry-mini) — a community SDK built on `@sentry/core` v10.
 
 ## Invoke This Skill When
 
 - User mentions **mini program**, **miniapp**, **小程序**, **WeChat**, **Alipay**, **ByteDance**, **Taro**, **uni-app** alongside Sentry
 - User wants to add error monitoring or performance tracking to a mini program
 - User asks about Sentry support for WeChat/Alipay/ByteDance mini programs
-- User imports or references `sentry-miniapp` in their project
+- User imports or references `@xumoses/sentry-mini` or the legacy `sentry-miniapp` package in their project
 
 > **Note:** SDK versions and APIs reflect the current sentry-miniapp docs. Always verify against the [sentry-miniapp README](https://github.com/lizhiyao/sentry-miniapp) before implementing.
 
@@ -31,7 +31,7 @@ ls app.json project.config.json mini.project.json 2>/dev/null
 cat app.json 2>/dev/null | head -20
 
 # Detect framework (Taro / uni-app / native)
-cat package.json 2>/dev/null | grep -E '"@tarojs/|"@dcloudio/uni-|"sentry-miniapp"'
+cat package.json 2>/dev/null | grep -E '"@tarojs/|"@dcloudio/uni-|"@xumoses/sentry-mini"|"sentry-miniapp"'
 
 # Check for existing Sentry SDK
 grep -r "sentry" package.json 2>/dev/null
@@ -50,7 +50,7 @@ ls yarn.lock pnpm-lock.yaml package-lock.json 2>/dev/null
 |----------|--------|
 | Which mini program platform? | Determines `platform` option and API differences |
 | Native or cross-platform framework (Taro/uni-app)? | Determines init pattern and build config |
-| Is `sentry-miniapp` already installed? | Skip install if present, check version |
+| Is `@xumoses/sentry-mini` or legacy `sentry-miniapp` already installed? | Skip install if present, check version |
 | Where is the app entry point? | Determines where to place `Sentry.init()` |
 | Is there a build tool config (webpack/vite)? | Needed for Source Map setup |
 
@@ -104,10 +104,10 @@ Present this recommendation based on detection results:
 
 ```bash
 # npm
-npm install sentry-miniapp
+npm install @xumoses/sentry-mini
 
 # yarn
-yarn add sentry-miniapp
+yarn add @xumoses/sentry-mini
 ```
 
 ### Step 2: Initialize
@@ -117,7 +117,7 @@ Create or modify the app entry point. `Sentry.init()` **must** be called **befor
 #### Native Mini Program (app.js)
 
 ```javascript
-const Sentry = require('sentry-miniapp');
+const Sentry = require('@xumoses/sentry-mini');
 
 Sentry.init({
   dsn: 'https://<key>@<org>.ingest.sentry.io/<project>',
@@ -134,7 +134,7 @@ App({
 #### Taro (app.js or app.ts)
 
 ```typescript
-import * as Sentry from 'sentry-miniapp';
+import * as Sentry from '@xumoses/sentry-mini';
 
 Sentry.init({
   dsn: 'https://<key>@<org>.ingest.sentry.io/<project>',
@@ -148,7 +148,7 @@ Sentry.init({
 #### uni-app (App.vue or main.js)
 
 ```javascript
-const Sentry = require('sentry-miniapp');
+const Sentry = require('@xumoses/sentry-mini');
 
 Sentry.init({
   dsn: 'https://<key>@<org>.ingest.sentry.io/<project>',

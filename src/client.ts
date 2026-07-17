@@ -139,7 +139,7 @@ export class MiniappClient extends Client<any> {
       packages: [
         ...((event.sdk && event.sdk.packages) || []),
         {
-          name: 'npm:@sentry/miniapp',
+          name: 'npm:@xumoses/sentry-mini',
           version: SDK_VERSION,
         },
       ],

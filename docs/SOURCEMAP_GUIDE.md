@@ -74,7 +74,7 @@ Sentry 面板展示原始源码位置
 **`release` 是 Source Map 生效的关键**——SDK 初始化时设置的 `release` 值必须与 sentry-cli 上传时使用的 release 名称**完全一致**。
 
 ```javascript
-import * as Sentry from 'sentry-miniapp';
+import * as Sentry from '@xumoses/sentry-mini';
 
 Sentry.init({
   dsn: 'https://examplePublicKey@o0.ingest.sentry.io/0',
@@ -574,7 +574,7 @@ SDK 会自动剥离所有 `协议://` 格式的前缀，因此 QQ、钉钉、快
 **1. SDK 初始化（`app.js`）：**
 
 ```javascript
-import * as Sentry from 'sentry-miniapp';
+import * as Sentry from '@xumoses/sentry-mini';
 
 Sentry.init({
   dsn: 'https://examplePublicKey@o0.ingest.sentry.io/0',

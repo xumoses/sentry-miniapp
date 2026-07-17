@@ -1,7 +1,7 @@
 # Sentry Miniapp SDK — Mini Program Monitoring SDK
 
-[![npm version](https://img.shields.io/npm/v/sentry-miniapp)](https://www.npmjs.com/package/sentry-miniapp)
-[![npm downloads/month](https://img.shields.io/npm/dm/sentry-miniapp)](https://www.npmjs.com/package/sentry-miniapp)
+[![npm version](https://img.shields.io/npm/v/%40xumoses%2Fsentry-mini)](https://www.npmjs.com/package/@xumoses/sentry-mini)
+[![npm downloads/month](https://img.shields.io/npm/dm/%40xumoses%2Fsentry-mini)](https://www.npmjs.com/package/@xumoses/sentry-mini)
 [![github forks](https://img.shields.io/github/forks/lizhiyao/sentry-miniapp?style=social)](https://github.com/lizhiyao/sentry-miniapp/network/members)
 [![github stars](https://img.shields.io/github/stars/lizhiyao/sentry-miniapp?style=social)](https://github.com/lizhiyao/sentry-miniapp/stargazers)
 ![test coverage](https://img.shields.io/badge/test%20coverage-100%25-brightgreen.svg)
@@ -58,7 +58,7 @@ See [CHANGELOG.md](./CHANGELOG.md) for full details.
 ## 📦 Installation
 
 ```bash
-npm install sentry-miniapp
+npm install @xumoses/sentry-mini
 ```
 
 > Not using npm? Copy `examples/wxapp/lib/sentry-miniapp.js` from this repo directly into your project.
@@ -82,7 +82,7 @@ Then just ask "help me set up Sentry monitoring" in your AI editor.
 Initialize at the **top** of your entry file (`app.js` / `app.ts`), **before** `App()`:
 
 ```javascript
-import * as Sentry from 'sentry-miniapp';
+import * as Sentry from '@xumoses/sentry-mini';
 
 Sentry.init({
   dsn: 'https://<key>@sentry.io/<project>',
@@ -151,7 +151,7 @@ sentry-cli releases files "my-miniapp@1.0.0" upload-sourcemaps ./dist \
 
 ## 🎮 Mini Game Support
 
-`sentry-miniapp` also works in WeChat / Douyin **mini games**: auto-detects the environment, error / network / device monitoring out of the box, plus **cold-start first-frame timing** and **frame-rate / jank monitoring**. Initialization is identical to mini programs; with `tracesSampleRate` enabled, performance data is reported as independent transactions on the Performance page.
+`@xumoses/sentry-mini` also works in WeChat / Douyin **mini games**: auto-detects the environment, error / network / device monitoring out of the box, plus **cold-start first-frame timing** and **frame-rate / jank monitoring**. Initialization is identical to mini programs; with `tracesSampleRate` enabled, performance data is reported as independent transactions on the Performance page.
 
 > Capability matrix and performance-reporting details: [docs site · Platforms & Capabilities](https://sentry-miniapp.pages.dev/guide/platforms).
 

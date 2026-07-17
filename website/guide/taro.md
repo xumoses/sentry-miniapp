@@ -14,7 +14,7 @@ Taro 默认使用 **React**（也可通过 `framework` 配置切换到 Vue3 / Vu
 ## 1. 安装
 
 ```bash
-npm install sentry-miniapp --save
+npm install @xumoses/sentry-mini --save
 ```
 
 ## 2. 初始化封装
@@ -22,7 +22,7 @@ npm install sentry-miniapp --save
 新建 `src/utils/sentry.ts`，集中放初始化（DSN、采样、标签）：
 
 ```ts
-import * as Sentry from 'sentry-miniapp';
+import * as Sentry from '@xumoses/sentry-mini';
 
 Sentry.init({
   dsn: 'https://your-dsn@o0.ingest.sentry.io/0',
@@ -106,7 +106,7 @@ export default class SentryBoundary extends Component<{ children: ReactNode }, {
 若 Taro 工程还编译 H5，用 `process.env.TARO_ENV` 分端引入——小程序用 `sentry-miniapp`，H5 用功能完整、官方维护的 `@sentry/browser`：
 
 ```bash
-npm install sentry-miniapp @sentry/browser --save
+npm install @xumoses/sentry-mini @sentry/browser --save
 ```
 
 ```ts
@@ -114,7 +114,7 @@ let Sentry;
 if (process.env.TARO_ENV === 'h5') {
   Sentry = require('@sentry/browser'); // H5 端
 } else {
-  Sentry = require('sentry-miniapp'); // 小程序端
+  Sentry = require('@xumoses/sentry-mini'); // 小程序端
 }
 ```
 

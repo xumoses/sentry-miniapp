@@ -20,7 +20,7 @@ export default defineConfig({
     nav: [
       { text: '指南', link: '/guide/getting-started', activeMatch: '/guide/' },
       { text: '常见问题', link: '/guide/faq' },
-      { text: 'npm', link: 'https://www.npmjs.com/package/sentry-miniapp' },
+      { text: 'npm', link: 'https://www.npmjs.com/package/@xumoses/sentry-mini' },
     ],
 
     sidebar: {

@@ -85,6 +85,10 @@ describe('MiniappClient', () => {
 
       expect(preparedEvent?.sdk).toBeDefined();
       expect(preparedEvent?.sdk?.name).toBe('sentry.javascript.miniapp');
+      expect(preparedEvent?.sdk?.packages).toContainEqual({
+        name: 'npm:@xumoses/sentry-mini',
+        version: preparedEvent?.sdk?.version,
+      });
       expect(preparedEvent?.sdk?.version).toBeDefined();
     });
 

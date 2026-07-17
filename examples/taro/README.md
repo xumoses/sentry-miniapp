@@ -64,11 +64,11 @@ Taro 真机错误栈是微信合并后的 `appservice.app.js`，**分页 Source 
 
 ## 用本地源码而非已发布版
 
-示例默认依赖已发布的 `sentry-miniapp`（`package.json` 中 `"sentry-miniapp": "^1.11.0"`）。
+示例默认依赖已发布的 `@xumoses/sentry-mini`（`package.json` 中 `"@xumoses/sentry-mini": "^1.13.1"`）。
 若想验证仓库当前源码，先在仓库根执行 `yarn build`，再把本目录依赖改为：
 
 ```jsonc
-"sentry-miniapp": "file:../.."
+"@xumoses/sentry-mini": "file:../.."
 ```
 
 重新 `npm install` 即可。

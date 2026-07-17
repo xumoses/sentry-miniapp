@@ -52,14 +52,14 @@ features:
 ## 安装
 
 ```bash
-npm install sentry-miniapp --save
-# 或 yarn add sentry-miniapp
+npm install @xumoses/sentry-mini --save
+# 或 yarn add @xumoses/sentry-mini
 ```
 
 ## 一分钟接入
 
 ```js
-import * as Sentry from 'sentry-miniapp';
+import * as Sentry from '@xumoses/sentry-mini';
 
 Sentry.init({
   dsn: 'https://your-dsn@o0.ingest.sentry.io/0',

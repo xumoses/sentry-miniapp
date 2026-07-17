@@ -30,7 +30,7 @@
     "@tarojs/taro": "4.2.0",
     "react": "^18.0.0",
     "react-dom": "^18.0.0",
-    "sentry-miniapp": "^1.11.0"
+    "@xumoses/sentry-mini": "^1.13.1"
   },
   "devDependencies": {
     "@babel/core": "^7.24.4",

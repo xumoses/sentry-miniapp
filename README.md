@@ -1,7 +1,7 @@
 # Sentry Miniapp SDK — 小程序监控 SDK
 
-[![npm version](https://img.shields.io/npm/v/sentry-miniapp)](https://www.npmjs.com/package/sentry-miniapp)
-[![npm download](https://img.shields.io/npm/dm/sentry-miniapp)](https://www.npmjs.com/package/sentry-miniapp)
+[![npm version](https://img.shields.io/npm/v/%40xumoses%2Fsentry-mini)](https://www.npmjs.com/package/@xumoses/sentry-mini)
+[![npm download](https://img.shields.io/npm/dm/%40xumoses%2Fsentry-mini)](https://www.npmjs.com/package/@xumoses/sentry-mini)
 [![github forks](https://img.shields.io/github/forks/lizhiyao/sentry-miniapp?style=social)](https://github.com/lizhiyao/sentry-miniapp/network/members)
 [![github stars](https://img.shields.io/github/stars/lizhiyao/sentry-miniapp?style=social)](https://github.com/lizhiyao/sentry-miniapp/stargazers)
 ![test coverage](https://img.shields.io/badge/test%20coverage-100%25-brightgreen.svg)
@@ -56,7 +56,7 @@
 ## 📦 安装
 
 ```bash
-npm install sentry-miniapp
+npm install @xumoses/sentry-mini
 ```
 
 > 不使用 npm 时，也可直接将 `examples/wxapp/lib/sentry-miniapp.js` 复制到小程序项目中引入。
@@ -80,7 +80,7 @@ npx skills add https://github.com/lizhiyao/sentry-miniapp --skill sentry-miniapp
 在入口文件（`app.js` / `app.ts`）**最顶部、`App()` 之前**初始化：
 
 ```javascript
-import * as Sentry from 'sentry-miniapp';
+import * as Sentry from '@xumoses/sentry-mini';
 
 Sentry.init({
   dsn: 'https://<key>@sentry.io/<project>',
@@ -149,7 +149,7 @@ sentry-cli releases files "my-miniapp@1.0.0" upload-sourcemaps ./dist \
 
 ## 🎮 小游戏支持
 
-`sentry-miniapp` 同样适用于微信 / 抖音等**小游戏**：自动识别环境，异常 / 网络 / 设备监控开箱即用，并额外提供**冷启动首帧耗时**与**帧率 / 卡顿监控**。初始化与小程序完全一致，开启 `tracesSampleRate` 后性能数据会作为独立 transaction 进 Performance 页。
+`@xumoses/sentry-mini` 同样适用于微信 / 抖音等**小游戏**：自动识别环境，异常 / 网络 / 设备监控开箱即用，并额外提供**冷启动首帧耗时**与**帧率 / 卡顿监控**。初始化与小程序完全一致，开启 `tracesSampleRate` 后性能数据会作为独立 transaction 进 Performance 页。
 
 > 能力矩阵与性能上报细节见[文档站 · 支持平台与能力](https://sentry-miniapp.pages.dev/guide/platforms)。
 

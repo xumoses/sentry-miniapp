@@ -1,5 +1,5 @@
 {
-  "name": "sentry-miniapp",
+  "name": "@xumoses/sentry-mini",
   "version": "1.13.2",
   "description": "Sentry SDK for Mini Programs (WeChat, Alipay, ByteDance, Baidu, QQ, DingTalk, Kuaishou) & Taro / uni-app | 小程序监控 SDK，支持异常监控、性能监控、错误收集",
   "repository": {
@@ -25,6 +25,9 @@
   },
   "author": "dancerlzy@gmail.com",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "packageManager": "yarn@4.16.0",
   "engines": {
     "node": ">=20"

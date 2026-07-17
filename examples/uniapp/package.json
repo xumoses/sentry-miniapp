@@ -11,7 +11,7 @@
     "@dcloudio/uni-app": "3.0.0-5000720260410001",
     "@dcloudio/uni-components": "3.0.0-5000720260410001",
     "@dcloudio/uni-mp-weixin": "3.0.0-5000720260410001",
-    "sentry-miniapp": "^1.9.0",
+    "@xumoses/sentry-mini": "^1.13.1",
     "vue": "^3.4.21"
   },
   "devDependencies": {
