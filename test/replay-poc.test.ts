@@ -371,6 +371,201 @@ describe('Taro DOM Replay POC', () => {
     controller.stop();
   });
 
+  it('serializes primitive attributes and missing Taro node fields conservatively', () => {
+    const observer = observerHarness();
+    const unknownNode: TaroReplayNodeLike = {
+      nodeType: 1,
+      sid: 'unknown-1',
+    };
+    const commentNode: TaroReplayNodeLike = {
+      nodeType: 8,
+      nodeName: 'comment',
+      sid: 'comment-1',
+      textContent: null,
+    };
+    const tagOnlyNode: TaroReplayNodeLike = {
+      nodeType: 1,
+      tagName: 'button',
+      sid: 'button-1',
+      attributes: [
+        null,
+        { name: '', value: 'ignored' },
+        { name: 'onTap', value: 'ignored' },
+        { name: 'enabled', value: true },
+        { name: 'count', value: 2 },
+        { name: 'nullable', value: null },
+        { name: 'missing', value: undefined },
+        { name: 'disabled', value: false },
+        { name: 'href', value: null },
+      ] as unknown as NonNullable<TaroReplayNodeLike['attributes']>,
+      childNodes: [unknownNode, commentNode],
+    };
+    const input = element('input', 'input-1', { value: null });
+    const controller = startTaroDomReplayPoc({
+      root: element('view', 'root-1', {}, [tagOnlyNode, input]),
+      MutationObserver: observer.MutationObserver,
+      maskAllText: false,
+      metadata: { environment: 'test' },
+      now: () => 2_475,
+    });
+
+    const capture = controller.getCapture();
+    const snapshot = fullSnapshotNode(capture.events);
+    const button = findNode(snapshot, (node) => node.tagName === 'button');
+    expect(button?.attributes).toEqual(
+      expect.objectContaining({
+        enabled: true,
+        count: 2,
+        nullable: null,
+        missing: null,
+        disabled: null,
+        href: '',
+      }),
+    );
+    expect(button?.attributes).not.toHaveProperty('onTap');
+    expect(
+      findNode(
+        snapshot,
+        (node) => node.attributes?.['data-taro-unsupported'] === 'unknown',
+      ),
+    ).toBeDefined();
+    expect(findNode(snapshot, (node) => node.type === 5)?.textContent).toBe('');
+    expect(findNode(snapshot, (node) => node.tagName === 'input')?.attributes?.['value']).toBe('');
+    expect(capture.metadata).toEqual({ environment: 'test' });
+    controller.stop();
+
+    const unmaskedInputController = startTaroDomReplayPoc({
+      root: element('input', 'input-unmasked', { value: 'public' }),
+      MutationObserver: observer.MutationObserver,
+      maskInputValues: false,
+      now: () => 2_476,
+    });
+    expect(
+      findNode(
+        fullSnapshotNode(unmaskedInputController.getCapture().events),
+        (node) => node.tagName === 'input',
+      )?.attributes?.['value'],
+    ).toBe('public');
+    unmaskedInputController.stop();
+  });
+
+  it('stops when a breadcrumb would exceed the event limit', () => {
+    const observer = observerHarness();
+    const controller = startTaroDomReplayPoc({
+      root: element('view', 'root-1'),
+      MutationObserver: observer.MutationObserver,
+      maxEvents: 3,
+      now: () => 7_000,
+    });
+
+    expect(
+      controller.addBreadcrumb({
+        category: 'navigation',
+        timestamp: 10_000_000_001,
+      }),
+    ).toBe(true);
+    expect(controller.getCapture().events[2]?.timestamp).toBe(10_000_000_001);
+    expect(controller.addBreadcrumb({ category: 'navigation' })).toBe(false);
+    expect(controller.getCapture()).toEqual(
+      expect.objectContaining({
+        stopReason: 'limit',
+        stats: expect.objectContaining({ breadcrumbCount: 1 }),
+      }),
+    );
+    expect(observer.current()?.disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('handles empty, removal-only, addition-only and missing-attribute mutations', () => {
+    const observer = observerHarness();
+    const removed = textNode('remove', 'removed-1');
+    const sibling = textNode('sibling', 'sibling-1');
+    const root = element('view', 'root-1', {}, [removed, sibling]);
+    const controller = startTaroDomReplayPoc({
+      root,
+      MutationObserver: observer.MutationObserver,
+      maskAllText: false,
+      now: () => 7_500,
+    });
+    const observerInstance = observer.current();
+    const snapshot = fullSnapshotNode(controller.getCapture().events);
+    const removedId = findNode(snapshot, (node) => node.textContent === 'remove')?.id;
+    const siblingId = findNode(snapshot, (node) => node.textContent === 'sibling')?.id;
+
+    observerInstance?.emit([{ type: 'childList', target: root }]);
+    expect(controller.getCapture().events).toHaveLength(2);
+
+    observerInstance?.emit([{ type: 'childList', target: root, removedNodes: [removed] }]);
+    expect(mutationData(controller.getCapture().events[2] as TaroReplayPocEvent).removes).toEqual([
+      { parentId: expect.any(Number), id: removedId },
+    ]);
+
+    const added = textNode('added', 'added-1');
+    observerInstance?.emit([
+      { type: 'childList', target: root, addedNodes: [added], nextSibling: sibling },
+    ]);
+    expect(mutationData(controller.getCapture().events[3] as TaroReplayPocEvent).adds).toEqual([
+      expect.objectContaining({ nextId: siblingId }),
+    ]);
+
+    const nodeWithoutAttributeMethods: TaroReplayNodeLike = {
+      nodeType: 1,
+      nodeName: 'view',
+      sid: 'bare-1',
+    };
+    observerInstance?.emit([
+      { type: 'attributes', target: nodeWithoutAttributeMethods, attributeName: 'title' },
+    ]);
+    expect(
+      mutationData(controller.getCapture().events[4] as TaroReplayPocEvent).attributes,
+    ).toEqual([expect.objectContaining({ attributes: { title: null } })]);
+
+    observerInstance?.emit([{ type: 'attributes', target: root, attributeName: 'style' }]);
+    expect(
+      mutationData(controller.getCapture().events[5] as TaroReplayPocEvent).attributes,
+    ).toEqual([expect.objectContaining({ attributes: { style: null } })]);
+
+    const emptyText: TaroReplayNodeLike = {
+      nodeType: 3,
+      nodeName: '#text',
+      sid: 'empty-text-1',
+      textContent: null,
+    };
+    observerInstance?.emit([{ type: 'characterData', target: emptyText }]);
+    expect(mutationData(controller.getCapture().events[6] as TaroReplayPocEvent).texts).toEqual([
+      expect.objectContaining({ value: '' }),
+    ]);
+
+    const stopped = controller.stop();
+    observerInstance?.emit([{ type: 'characterData', target: emptyText }]);
+    expect(controller.stop()).toEqual(stopped);
+    expect(observerInstance?.disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('automatically stops when the duration expires', () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(8_000);
+    try {
+      const observer = observerHarness();
+      const onStop = jest.fn();
+      const controller = startTaroDomReplayPoc({
+        root: element('view', 'root-1'),
+        MutationObserver: observer.MutationObserver,
+        maxDurationMs: 25,
+        onStop,
+      });
+
+      expect(controller.getCapture().stopReason).toBeNull();
+      jest.advanceTimersByTime(25);
+      expect(controller.getCapture()).toEqual(
+        expect.objectContaining({ endedAt: 8_025, stopReason: 'duration' }),
+      );
+      expect(onStop).toHaveBeenCalledTimes(1);
+      expect(observer.current()?.disconnect).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('uses object ids for sid-less nodes and records attribute and child removal fallbacks', () => {
     const observer = observerHarness();
     const removed = textNode('remove me', 'removed-1');
