@@ -1,7 +1,7 @@
 # Sentry Miniapp SDK — 小程序监控 SDK
 
-[![npm version](https://img.shields.io/npm/v/%40xumoses%2Fsentry-mini)](https://www.npmjs.com/package/@xumoses/sentry-mini)
-[![npm download](https://img.shields.io/npm/dm/%40xumoses%2Fsentry-mini)](https://www.npmjs.com/package/@xumoses/sentry-mini)
+[![npm beta version](https://img.shields.io/npm/v/%40xumoses%2Fsentry-miniapp/beta)](https://www.npmjs.com/package/@xumoses/sentry-miniapp)
+[![npm download](https://img.shields.io/npm/dm/%40xumoses%2Fsentry-miniapp)](https://www.npmjs.com/package/@xumoses/sentry-miniapp)
 [![github forks](https://img.shields.io/github/forks/lizhiyao/sentry-miniapp?style=social)](https://github.com/lizhiyao/sentry-miniapp/network/members)
 [![github stars](https://img.shields.io/github/stars/lizhiyao/sentry-miniapp?style=social)](https://github.com/lizhiyao/sentry-miniapp/stargazers)
 ![test coverage](https://img.shields.io/badge/test%20coverage-100%25-brightgreen.svg)
@@ -56,8 +56,12 @@
 ## 📦 安装
 
 ```bash
-npm install @xumoses/sentry-mini
+npm install @xumoses/sentry-miniapp@beta
 ```
+
+> `@xumoses/sentry-miniapp` 是内部验证发行线，只使用 `beta` dist-tag 和
+> `官方版本-beta.N` 版本号。同步新的社区版本后从对应的 `beta.0` 重新开始，不发布
+> `latest` 或稳定版本。
 
 > 不使用 npm 时，也可直接将 `examples/wxapp/lib/sentry-miniapp.js` 复制到小程序项目中引入。
 
@@ -80,7 +84,7 @@ npx skills add https://github.com/lizhiyao/sentry-miniapp --skill sentry-miniapp
 在入口文件（`app.js` / `app.ts`）**最顶部、`App()` 之前**初始化：
 
 ```javascript
-import * as Sentry from '@xumoses/sentry-mini';
+import * as Sentry from '@xumoses/sentry-miniapp';
 
 Sentry.init({
   dsn: 'https://<key>@sentry.io/<project>',
@@ -149,7 +153,7 @@ sentry-cli releases files "my-miniapp@1.0.0" upload-sourcemaps ./dist \
 
 ## 🎮 小游戏支持
 
-`@xumoses/sentry-mini` 同样适用于微信 / 抖音等**小游戏**：自动识别环境，异常 / 网络 / 设备监控开箱即用，并额外提供**冷启动首帧耗时**与**帧率 / 卡顿监控**。初始化与小程序完全一致，开启 `tracesSampleRate` 后性能数据会作为独立 transaction 进 Performance 页。
+`@xumoses/sentry-miniapp` 同样适用于微信 / 抖音等**小游戏**：自动识别环境，异常 / 网络 / 设备监控开箱即用，并额外提供**冷启动首帧耗时**与**帧率 / 卡顿监控**。初始化与小程序完全一致，开启 `tracesSampleRate` 后性能数据会作为独立 transaction 进 Performance 页。
 
 > 能力矩阵与性能上报细节见[文档站 · 支持平台与能力](https://sentry-miniapp.pages.dev/guide/platforms)。
 

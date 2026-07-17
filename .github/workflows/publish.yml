@@ -3,7 +3,7 @@ name: CD - Publish to NPM
 on:
   push:
     tags:
-      - 'v*' # 仅在推送以 'v' 开头的 Tag 时触发，例如 v1.4.0
+      - 'v*-beta.*' # 私有 fork 永远只发布 beta，例如 v1.13.1-beta.0
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -21,34 +21,37 @@ jobs:
       id-token: write # 这使得工作流能够通过 OIDC 从 GitHub 获取凭证
 
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '22.x'
-        registry-url: 'https://registry.npmjs.org'
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          registry-url: 'https://registry.npmjs.org'
 
-    - name: Enable Corepack
-      run: corepack enable
+      - name: Enable Corepack
+        run: corepack enable
 
-    - name: Install dependencies
-      run: yarn install --immutable
+      - name: Install dependencies
+        run: yarn install --immutable
 
-    - name: Run Lint
-      run: yarn run lint
+      - name: Run Lint
+        run: yarn run lint
 
-    - name: Type Check
-      run: yarn run typecheck
+      - name: Type Check
+        run: yarn run typecheck
 
-    - name: Run Tests
-      run: yarn run test
+      - name: Run Tests
+        run: yarn run test
 
-    - name: Build Project
-      run: yarn run build
+      - name: Verify Beta Release Policy
+        run: yarn run verify:beta-release
 
-    - name: Publish to NPM
-      run: npm publish --access public --provenance
-      env:
-        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Build Project
+        run: yarn run build
+
+      - name: Publish to NPM
+        run: npm publish --access public --provenance --tag beta
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

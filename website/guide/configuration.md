@@ -68,7 +68,7 @@ tracesSampler: ({ name, inheritOrSampleWith }) => {
 | `onConsentCacheDrop` | `function` | — | 同意缓冲因 `count` / `bytes` / `age` 丢弃事件时回调 `{ reason, dropped }` |
 
 ```js
-import * as Sentry from '@xumoses/sentry-mini';
+import * as Sentry from '@xumoses/sentry-miniapp';
 
 Sentry.init({
   dsn: 'https://<key>@sentry.io/<project>',

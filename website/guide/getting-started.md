@@ -7,8 +7,8 @@
 ## 1. 安装
 
 ```bash
-npm install @xumoses/sentry-mini --save
-# 或 yarn add @xumoses/sentry-mini
+npm install @xumoses/sentry-miniapp@beta --save
+# 或 yarn add @xumoses/sentry-miniapp@beta
 ```
 
 ## 2. 初始化
@@ -16,7 +16,7 @@ npm install @xumoses/sentry-mini --save
 **务必让 `Sentry.init` 在 `App()` 调用之前执行**，这样才能捕获到应用启动阶段的异常、并在业务请求之前装好网络面包屑。
 
 ```js
-import * as Sentry from '@xumoses/sentry-mini';
+import * as Sentry from '@xumoses/sentry-miniapp';
 
 Sentry.init({
   dsn: 'https://your-dsn@o0.ingest.sentry.io/0',

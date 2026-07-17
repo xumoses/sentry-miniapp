@@ -39,11 +39,11 @@ npm run build:mp-weixin
 
 ## 用本地源码而非已发布版
 
-示例默认依赖已发布的 `@xumoses/sentry-mini`（`package.json` 中 `"@xumoses/sentry-mini": "^1.13.1"`）。
+示例默认依赖 beta 版本 `@xumoses/sentry-miniapp`（`package.json` 中 `"@xumoses/sentry-miniapp": "1.13.1-beta.0"`）。
 若想验证仓库当前源码，先在仓库根执行 `yarn build`，再把本目录依赖改为：
 
 ```jsonc
-"@xumoses/sentry-mini": "file:../.."
+"@xumoses/sentry-miniapp": "file:../.."
 ```
 
 重新 `npm install` 即可。

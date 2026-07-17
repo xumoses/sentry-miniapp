@@ -1,12 +1,12 @@
 {
-  "name": "@xumoses/sentry-mini",
-  "version": "1.13.2",
+  "name": "@xumoses/sentry-miniapp",
+  "version": "1.13.2-beta.0",
   "description": "Sentry SDK for Mini Programs (WeChat, Alipay, ByteDance, Baidu, QQ, DingTalk, Kuaishou) & Taro / uni-app | 小程序监控 SDK，支持异常监控、性能监控、错误收集",
   "repository": {
     "type": "git",
-    "url": "git://github.com/lizhiyao/sentry-miniapp.git"
+    "url": "git+https://github.com/xumoses/sentry-miniapp.git"
   },
-  "homepage": "https://github.com/lizhiyao/sentry-miniapp",
+  "homepage": "https://github.com/xumoses/sentry-miniapp",
   "scripts": {
     "build": "vite build && npm run sync:examples",
     "sync:examples": "cp dist/sentry-miniapp.umd.js examples/wxapp/lib/sentry-miniapp.js && cp dist/sentry-miniapp.umd.js.map examples/wxapp/lib/sentry-miniapp.js.map",
@@ -19,14 +19,18 @@
     "lint": "eslint src test --ext .ts",
     "typecheck": "tsc --noEmit",
     "test": "jest",
-    "prepublishOnly": "npm run build",
+    "verify:beta-release": "node scripts/verify-beta-release.cjs",
+    "prepack": "npm run verify:beta-release",
+    "prepublishOnly": "npm run verify:beta-release && npm run build",
     "prepare": "husky",
-    "release": "commit-and-tag-version"
+    "release": "commit-and-tag-version --prerelease beta"
   },
   "author": "dancerlzy@gmail.com",
   "license": "MIT",
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "tag": "beta",
+    "registry": "https://registry.npmjs.org/"
   },
   "packageManager": "yarn@4.16.0",
   "engines": {

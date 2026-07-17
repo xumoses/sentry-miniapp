@@ -8,10 +8,10 @@
  *   import * as Sentry from '@sentry/browser';
  *   // #endif
  *   // #ifdef MP-WEIXIN || MP-ALIPAY || MP-BAIDU || MP-TOUTIAO || MP-QQ || MP-KUAISHOU || MP-DINGTALK
- *   import * as Sentry from '@xumoses/sentry-mini';
+ *   import * as Sentry from '@xumoses/sentry-miniapp';
  *   // #endif
  */
-import * as Sentry from '@xumoses/sentry-mini';
+import * as Sentry from '@xumoses/sentry-miniapp';
 
 // 与 examples/wxapp 共用同一个演示 Sentry 项目 DSN，开箱即可上报。
 // 换成你自己项目的 DSN 后，即可在你的后台观察数据。
