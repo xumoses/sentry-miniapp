@@ -115,7 +115,7 @@ describe('Taro DOM Replay POC', () => {
     ).toThrow('A mounted Taro root node is required');
   });
 
-  it('records a FullSnapshot and monotonic text mutations, then disconnects', () => {
+  it('records a masked FullSnapshot and monotonic text mutations, then disconnects', () => {
     const observer = observerHarness();
     const text = textNode('zero', 'text-1');
     const root = element('view', 'root-1', {}, [text]);
@@ -127,10 +127,11 @@ describe('Taro DOM Replay POC', () => {
 
     const initial = controller.getCapture();
     expect(initial.href).toBe('https://miniapp.local/replay-poc');
+    expect(initial.replayId).toMatch(/^[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$/);
     expect(initial.events.map((event) => event.type)).toEqual([4, 2]);
     expect(initial.events.map((event) => event.timestamp)).toEqual([1_000, 1_001]);
     expect(
-      findNode(fullSnapshotNode(initial.events), (node) => node.textContent === 'zero'),
+      findNode(fullSnapshotNode(initial.events), (node) => node.textContent === '****'),
     ).toBeDefined();
     expect(observer.current()?.observe).toHaveBeenCalledWith(root, {
       attributes: true,
@@ -145,7 +146,7 @@ describe('Taro DOM Replay POC', () => {
     const capture = controller.stop('manual');
     expect(capture.events[2]?.timestamp).toBe(1_002);
     expect(mutationData(capture.events[2] as TaroReplayPocEvent).texts).toEqual([
-      expect.objectContaining({ value: 'one' }),
+      expect.objectContaining({ value: '***' }),
     ]);
     expect(capture.stats.mutationCount).toBe(1);
     expect(capture.stopReason).toBe('manual');
@@ -277,7 +278,62 @@ describe('Taro DOM Replay POC', () => {
         expect.objectContaining({ attributes: { value: '*******' } }),
       ]),
     );
-    expect(data.adds[0]?.node.textContent).toBe('new child');
+    expect(data.adds[0]?.node.textContent).toBe('*** *****');
+    controller.stop();
+  });
+
+  it('allows privacy-safe text opt-out and strips URL secrets from captures', () => {
+    const observer = observerHarness();
+    const image = element('image', 'image-1', {
+      src: 'https://user:password@example.com/avatar.png?token=secret#profile',
+      'data-access-token': 'private-token',
+    });
+    const root = element('view', 'root-1', {}, [textNode('public text', 'text-1'), image]);
+    const controller = startTaroDomReplayPoc({
+      root,
+      MutationObserver: observer.MutationObserver,
+      href: 'https://miniapp.local/pages/home?openid=secret#state',
+      maskAllText: false,
+      now: () => 2_250,
+    });
+
+    controller.addBreadcrumb({
+      category: 'fetch',
+      data: { url: 'https://api.example.com/users?access_token=secret#result' },
+    });
+
+    const capture = controller.getCapture();
+    const snapshot = fullSnapshotNode(capture.events);
+    expect(capture.href).toBe('https://miniapp.local/pages/home');
+    expect(findNode(snapshot, (node) => node.textContent === 'public text')).toBeDefined();
+    expect(findNode(snapshot, (node) => node.tagName === 'img')?.attributes?.['src']).toBe(
+      'https://[filtered]:[filtered]@example.com/avatar.png',
+    );
+    expect(
+      findNode(snapshot, (node) => node.tagName === 'img')?.attributes?.['data-access-token'],
+    ).toBe('[Filtered]');
+    expect(capture.events[2]?.data).toEqual({
+      tag: 'performanceSpan',
+      payload: expect.objectContaining({ description: 'https://api.example.com/users' }),
+    });
+    controller.stop();
+  });
+
+  it('accounts for replay event limits in UTF-8 bytes', () => {
+    const observer = observerHarness();
+    const controller = startTaroDomReplayPoc({
+      root: element('view', 'root-1', {}, [textNode('你好🚀', 'text-1')]),
+      MutationObserver: observer.MutationObserver,
+      maskAllText: false,
+      now: () => 2_400,
+    });
+
+    const capture = controller.getCapture();
+    const actualBytes = capture.events.reduce(
+      (total, event) => total + Buffer.byteLength(JSON.stringify(event), 'utf8'),
+      0,
+    );
+    expect(capture.stats.approximateBytes).toBe(actualBytes);
     controller.stop();
   });
 

@@ -9,7 +9,7 @@
  * has been evaluated in a real mini program.
  */
 
-import type { Breadcrumb } from '@sentry/core';
+import { uuid4, type Breadcrumb } from '@sentry/core';
 
 export const TARO_DOM_REPLAY_POC_MARKER = 'TARO_DOM_REPLAY_POC';
 
@@ -137,6 +137,8 @@ export interface StartTaroDomReplayPocOptions {
   href?: string;
   width?: number;
   height?: number;
+  /** Masks every Taro text node by default. Set to false only for privacy-safe content. */
+  maskAllText?: boolean;
   maskInputValues?: boolean;
   maxDurationMs?: number;
   maxEvents?: number;
@@ -171,16 +173,21 @@ const TAG_MAP: Record<string, string> = {
 
 const SELF_CLOSING_TAGS = new Set(['img', 'input']);
 const SYNTHETIC_NODE_MAX_ID = 9;
+const URL_ATTRIBUTE_NAMES = new Set(['action', 'formaction', 'href', 'poster', 'src']);
+const SENSITIVE_ATTRIBUTE_NAME =
+  /(?:authorization|cookie|token|password|passwd|secret|api[-_]?key|open[-_]?id|union[-_]?id|phone|email|idcard|user[-_]?id|account)/i;
 
-function makeReplayId(now: number): string {
-  const time = now.toString(16).padStart(12, '0');
-  let random = '';
-  while (random.length < 20) {
-    random += Math.floor(Math.random() * 0xffffffff)
-      .toString(16)
-      .padStart(8, '0');
+function sanitizeUrl(value: string): string {
+  if (value.startsWith('data:')) {
+    const mimeType = value.match(/^data:([^;,]+)/)?.[1] || 'text/plain';
+    return `data:${mimeType}`;
   }
-  return `${time}${random}`.slice(0, 32);
+
+  const withoutQueryOrFragment = value.split(/[?#]/, 1)[0] || '';
+  return withoutQueryOrFragment.replace(
+    /^([a-z][a-z0-9+.-]*:\/\/)([^/?#@]+@)/i,
+    '$1[filtered]:[filtered]@',
+  );
 }
 
 function toArray<T>(value: T[] | ArrayLike<T> | undefined): T[] {
@@ -199,7 +206,7 @@ function primitiveAttributeValue(value: unknown): string | number | true | null 
 }
 
 function maskValue(value: unknown): string {
-  return '*'.repeat(Math.max(1, String(value ?? '').length));
+  return String(value ?? '').replace(/\S/gu, '*');
 }
 
 function isInputNode(node: TaroReplayNodeLike): boolean {
@@ -213,9 +220,39 @@ function sanitizeAttributeValue(
   value: unknown,
   maskInputValues: boolean,
 ): string | number | true | null {
-  const safeValue =
-    maskInputValues && isInputNode(node) && name === 'value' ? maskValue(value) : value;
+  let safeValue = value;
+  if (SENSITIVE_ATTRIBUTE_NAME.test(name)) {
+    safeValue = '[Filtered]';
+  } else if (maskInputValues && isInputNode(node) && name.toLowerCase() === 'value') {
+    safeValue = maskValue(value);
+  } else if (URL_ATTRIBUTE_NAMES.has(name.toLowerCase())) {
+    safeValue = sanitizeUrl(String(value ?? ''));
+  }
   return primitiveAttributeValue(safeValue);
+}
+
+/** Counts UTF-8 bytes without relying on TextEncoder, which is absent in some mini program runtimes. */
+function utf8ByteLength(value: string): number {
+  let bytes = 0;
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code < 0x80) {
+      bytes += 1;
+    } else if (code < 0x800) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        index++;
+      } else {
+        bytes += 3;
+      }
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
 }
 
 function cloneCapture(capture: TaroReplayPocCapture): TaroReplayPocCapture {
@@ -254,6 +291,7 @@ export function startTaroDomReplayPoc(
   const maxDurationMs = options.maxDurationMs ?? 30_000;
   const maxEvents = options.maxEvents ?? 500;
   const maxBytes = options.maxBytes ?? 512 * 1024;
+  const maskAllText = options.maskAllText !== false;
   const maskInputValues = options.maskInputValues !== false;
   const warnings = new Set<string>();
   const idsBySid = new Map<string, number>();
@@ -270,8 +308,8 @@ export function startTaroDomReplayPoc(
   const capture: TaroReplayPocCapture = {
     marker: TARO_DOM_REPLAY_POC_MARKER,
     version: 1,
-    replayId: makeReplayId(startedAt),
-    href: options.href || 'https://miniapp.local/replay-poc',
+    replayId: uuid4(),
+    href: sanitizeUrl(options.href || 'https://miniapp.local/replay-poc'),
     startedAt,
     endedAt: null,
     stopReason: null,
@@ -330,7 +368,7 @@ export function startTaroDomReplayPoc(
       return {
         id: idFor(node),
         type: comment ? RrwebNodeType.Comment : RrwebNodeType.Text,
-        textContent: String(node.textContent ?? ''),
+        textContent: maskAllText ? maskValue(node.textContent) : String(node.textContent ?? ''),
       };
     }
 
@@ -392,7 +430,7 @@ export function startTaroDomReplayPoc(
   }
 
   function addEvent(event: TaroReplayPocEvent): boolean {
-    const eventBytes = JSON.stringify(event).length;
+    const eventBytes = utf8ByteLength(JSON.stringify(event));
     if (
       capture.events.length >= maxEvents ||
       capture.stats.approximateBytes + eventBytes > maxBytes
@@ -452,7 +490,7 @@ export function startTaroDomReplayPoc(
           tag: 'performanceSpan',
           payload: {
             op: `resource.${breadcrumb.category}`,
-            description: data['url'],
+            description: sanitizeUrl(data['url'] as string),
             startTimestamp: Math.max(0, endTimestamp - duration / 1_000),
             endTimestamp,
             data: {
@@ -513,7 +551,12 @@ export function startTaroDomReplayPoc(
     for (const record of records) {
       mutationCount++;
       if (record.type === 'characterData') {
-        texts.push({ id: idFor(record.target), value: String(record.target.textContent ?? '') });
+        texts.push({
+          id: idFor(record.target),
+          value: maskAllText
+            ? maskValue(record.target.textContent)
+            : String(record.target.textContent ?? ''),
+        });
       } else if (record.type === 'attributes' && record.attributeName) {
         attributes.push({
           id: idFor(record.target),

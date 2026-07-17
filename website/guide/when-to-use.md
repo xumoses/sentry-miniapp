@@ -21,7 +21,7 @@
 
 | 限制 | 说明 / 取舍 |
 |---|---|
-| **不支持 Session Replay** | Sentry 官方 Replay 依赖浏览器 DOM（rrweb），小程序双线程、无开放 DOM，无法复用。用**丰富面包屑**还原现场。 |
+| **Session Replay 仅有实验性 Taro 支持** | 原生小程序 / 小游戏没有可录制 DOM，仍需用**丰富面包屑**还原现场。Taro 4.2 可显式接入实验性虚拟 DOM recorder，但不属于默认 integrations，也不覆盖 Canvas、WebView、原生组件或完整 WXSS。 |
 | **主包体积 ~100KB** | 含完整 `@sentry/core` 引擎。在意的话用[分包异步加载降低主包占用](/guide/bundle-size)。 |
 | **不支持函数级 Profiling / 火焰图** | 小程序无底层栈采样 API。已有页面 / 组件级性能监控覆盖大部分场景。 |
 | **小游戏帧率监控依赖全局 `requestAnimationFrame`** | 小游戏有、可用；小程序逻辑层没有，开启也安全 no-op。 |
