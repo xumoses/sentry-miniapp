@@ -7,6 +7,8 @@ const projectRoot = path.resolve(__dirname, '..');
 const packageJson = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'));
 const versionSource = fs.readFileSync(path.join(projectRoot, 'src/version.ts'), 'utf8');
 const sdkVersion = /SDK_VERSION\s*=\s*'([^']+)'/.exec(versionSource)?.[1];
+const expectedReleaseTag = `v${packageJson.version}`;
+const githubRefName = process.env.GITHUB_REF_NAME;
 const failures = [];
 
 if (packageJson.name !== '@xumoses/sentry-miniapp') {
@@ -29,6 +31,12 @@ if (packageJson.publishConfig?.registry !== 'https://registry.npmjs.org/') {
 }
 if (process.env.npm_config_tag && process.env.npm_config_tag !== 'beta') {
   failures.push(`npm publish tag must be beta, got ${process.env.npm_config_tag}`);
+}
+if (process.env.GITHUB_ACTIONS === 'true' && !githubRefName) {
+  failures.push('GITHUB_REF_NAME must be set for GitHub Actions releases');
+}
+if (githubRefName && githubRefName !== expectedReleaseTag) {
+  failures.push(`release tag must be ${expectedReleaseTag}, got ${githubRefName}`);
 }
 
 if (failures.length) {
