@@ -87,6 +87,21 @@ export {
   type PerformanceIntegrationOptions,
 } from './integrations/performance';
 
+// Throwaway Taro DOM Replay POC. Explicitly opt-in; not part of default integrations.
+export {
+  TARO_DOM_REPLAY_POC_MARKER,
+  startTaroDomReplayPoc,
+  type StartTaroDomReplayPocOptions,
+  type TaroDomReplayPocController,
+  type TaroReplayMutationObserverConstructor,
+  type TaroReplayMutationObserverLike,
+  type TaroReplayMutationRecordLike,
+  type TaroReplayNodeLike,
+  type TaroReplayPocCapture,
+  type TaroReplayPocEvent,
+  type TaroReplayPocMetadata,
+} from './replay-poc';
+
 // Export Session utility functions from @sentry/core
 export { makeSession, closeSession, updateSession } from '@sentry/core';
 

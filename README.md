@@ -176,7 +176,7 @@ Sentry.captureFeedback({ message: '页面卡住了', name: '张三', email: 'zha
 - **必须在 `onError` 里手动上报吗？** 不用，`init` 会自动挂全局错误监听。
 - **网络请求会随错误上报吗？** 会，默认开启，记成 `category: xhr` 面包屑随错误一起发。
 - **uni-app（Vue）组件内错误上报率很低？** Vue 吞掉了组件错误，需接 `app.config.errorHandler`；Taro（React）用错误边界。
-- **支持 Session Replay 吗？** 不支持（小程序无 DOM），用面包屑还原现场。
+- **支持 Session Replay 吗？** 原生小程序仍不支持；Taro 4.2 提供显式启用的实验性 DOM Replay recorder，默认集成不会开启它。
 - **H5 端怎么办？** 用官方 `@sentry/browser`，按端条件编译引入。
 
 > 每条的完整解答见 **[文档站 · 常见问题](https://sentry-miniapp.pages.dev/guide/faq)**。

@@ -178,7 +178,7 @@ Sentry.captureFeedback({ message: 'The page is frozen', name: 'John Doe', email:
 - **Must I report manually in `onError`?** No — `init` hooks the global error listeners automatically.
 - **Are network requests included with errors?** Yes, on by default — recorded as `category: xhr` breadcrumbs shipped with the error.
 - **uni-app (Vue) component errors rarely reported?** Vue swallows component errors; wire `app.config.errorHandler`. Taro (React) uses an Error Boundary.
-- **Session Replay?** Not supported (no DOM); reconstruct via breadcrumbs.
+- **Session Replay?** Native mini programs remain unsupported; Taro 4.2 has an explicitly enabled experimental DOM Replay recorder which is never part of the default integrations.
 - **H5 build?** Use official `@sentry/browser`, branched via conditional compilation.
 
 > Full answers on the **[docs site · FAQ](https://sentry-miniapp.pages.dev/guide/faq)**.
