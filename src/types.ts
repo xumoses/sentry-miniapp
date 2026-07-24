@@ -63,6 +63,12 @@ export interface MiniappOptions {
   /** Sample rate */
   sampleRate?: number;
 
+  /** Probability that a logical Replay session records and uploads normally. */
+  replaysSessionSampleRate?: number;
+
+  /** Probability that a non-session-sampled Replay keeps a local error buffer. */
+  replaysOnErrorSampleRate?: number;
+
   /** Release version */
   release?: string;
 
@@ -108,6 +114,12 @@ export interface MiniappOptions {
 
   /** Before send hook */
   beforeSend?: (event: Event, hint?: EventHint) => Event | null | PromiseLike<Event | null>;
+
+  /**
+   * Observes an event after processors, `beforeSend`, and error sampling accepted it,
+   * immediately before its envelope is built. The callback may add correlation fields.
+   */
+  beforeSendEvent?: (event: Event, hint?: EventHint) => void;
 
   /** Before breadcrumb hook */
   beforeBreadcrumb?: (breadcrumb: Breadcrumb, hint?: Record<string, unknown>) => Breadcrumb | null;

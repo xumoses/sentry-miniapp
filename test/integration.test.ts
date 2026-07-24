@@ -124,10 +124,39 @@ describe('Integration（真 @sentry/core 端到端）', () => {
   });
 
   it('sampleRate=0：错误事件被采样丢弃，transport 收不到', async () => {
-    initWithCapture({ sampleRate: 0 });
+    const beforeSendEvent = jest.fn();
+    initWithCapture({ sampleRate: 0, beforeSendEvent });
     captureException(new Error('sampled out'));
     await flush(2000);
     expect(capturedEvents().length).toBe(0);
+    expect(beforeSendEvent).not.toHaveBeenCalled();
+  });
+
+  it('beforeSendEvent 只观察真正将发送的错误，并可在建 envelope 前关联 replay_id', async () => {
+    const accepted = jest.fn((event: any) => {
+      event.contexts = { ...event.contexts, replay: { replay_id: 'a'.repeat(32) } };
+    });
+    initWithCapture({
+      sampleRate: 1,
+      beforeSendEvent: accepted,
+      beforeSend: (event: any) =>
+        event.exception?.values?.some((value: any) => value.value?.includes('drop-me'))
+          ? null
+          : event,
+    });
+
+    captureException(new Error('drop-me'));
+    captureException(new Error('keep-me'));
+    await flush(2_000);
+
+    expect(accepted).toHaveBeenCalledTimes(1);
+    expect(capturedEvents()).toEqual([
+      expect.objectContaining({
+        contexts: expect.objectContaining({
+          replay: { replay_id: 'a'.repeat(32) },
+        }),
+      }),
+    ]);
   });
 
   it('tracesSampler 透传到 client 选项', () => {

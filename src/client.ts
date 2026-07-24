@@ -88,6 +88,10 @@ export class MiniappClient extends Client<any> {
         return baseTransport;
       },
     });
+
+    if (options.beforeSendEvent) {
+      this.on('beforeSendEvent', options.beforeSendEvent);
+    }
   }
 
   /**

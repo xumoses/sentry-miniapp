@@ -475,6 +475,39 @@ describe('Taro DOM Replay POC', () => {
     expect(observer.current()?.disconnect).toHaveBeenCalledTimes(1);
   });
 
+  it('rolls a bounded error buffer while preserving the playable checkpoint', () => {
+    const observer = observerHarness();
+    let now = 1_000;
+    const controller = startTaroDomReplayPoc({
+      root: element('view', 'root-1'),
+      MutationObserver: observer.MutationObserver,
+      maxEvents: 4,
+      rollingWindowMs: 30,
+      now: () => now,
+    });
+
+    for (let index = 0; index < 5; index++) {
+      now += 10;
+      expect(controller.addBreadcrumb({ category: 'ui', message: String(index) })).toBe(true);
+    }
+
+    const capture = controller.getCapture();
+    expect(capture.stopReason).toBeNull();
+    expect(capture.events).toHaveLength(4);
+    expect(capture.events.slice(0, 2).map((event) => event.type)).toEqual([4, 2]);
+    expect(capture.events.slice(2).map((event) => event.data)).toEqual([
+      expect.objectContaining({ payload: expect.objectContaining({ message: '3' }) }),
+      expect.objectContaining({ payload: expect.objectContaining({ message: '4' }) }),
+    ]);
+    expect(capture.stats.approximateBytes).toBe(
+      capture.events.reduce(
+        (total, event) => total + Buffer.byteLength(JSON.stringify(event), 'utf8'),
+        0,
+      ),
+    );
+    controller.stop();
+  });
+
   it('handles empty, removal-only, addition-only and missing-attribute mutations', () => {
     const observer = observerHarness();
     const removed = textNode('remove', 'removed-1');

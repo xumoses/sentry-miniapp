@@ -143,6 +143,10 @@ export interface StartTaroDomReplayPocOptions {
   maxDurationMs?: number;
   maxEvents?: number;
   maxBytes?: number;
+  /** Keeps a rolling tail while retaining the initial Meta + FullSnapshot checkpoint. */
+  rollingWindowMs?: number;
+  /** Allows a process-wide coordinator to keep one id across root attachments. */
+  replayId?: string;
   metadata?: TaroReplayPocMetadata;
   now?: () => number;
   onEvent?: (event: TaroReplayPocEvent) => void;
@@ -309,7 +313,7 @@ export function startTaroDomReplayPoc(
   const capture: TaroReplayPocCapture = {
     marker: TARO_DOM_REPLAY_POC_MARKER,
     version: 1,
-    replayId: uuid4(),
+    replayId: options.replayId || uuid4(),
     href: sanitizeUrl(options.href || 'https://miniapp.local/replay-poc'),
     startedAt,
     endedAt: null,
@@ -432,6 +436,25 @@ export function startTaroDomReplayPoc(
 
   function addEvent(event: TaroReplayPocEvent): boolean {
     const eventBytes = utf8ByteLength(JSON.stringify(event));
+    if (options.rollingWindowMs !== undefined) {
+      capture.events.push(event);
+      capture.stats.approximateBytes += eventBytes;
+      const minimumTimestamp = event.timestamp - Math.max(0, options.rollingWindowMs);
+      while (
+        capture.events.length > 2 &&
+        (capture.events.length > maxEvents ||
+          capture.stats.approximateBytes > maxBytes ||
+          (capture.events[2]?.timestamp ?? event.timestamp) < minimumTimestamp)
+      ) {
+        const removed = capture.events.splice(2, 1)[0];
+        if (removed) {
+          capture.stats.approximateBytes -= utf8ByteLength(JSON.stringify(removed));
+        }
+      }
+      capture.stats.eventCount = capture.events.length;
+      options.onEvent?.(event);
+      return capture.events.includes(event);
+    }
     if (
       capture.events.length >= maxEvents ||
       capture.stats.approximateBytes + eventBytes > maxBytes

@@ -17,6 +17,9 @@
 | 选项 | 类型 | 默认 | 说明 |
 |------|------|------|------|
 | `sampleRate` | `number` | `1.0` | 错误事件采样率（0.0–1.0） |
+| `replaysSessionSampleRate` | `number` | `0` | 普通完整 Replay 会话采样率（由 Replay integration 使用） |
+| `replaysOnErrorSampleRate` | `number` | `0` | 普通采样未命中后的错误前 buffer 采样率 |
+| `beforeSendEvent` | `(event, hint?) => void` | — | 事件通过处理、`beforeSend` 与采样后，构建 envelope 前调用 |
 | `tracesSampleRate` | `number` | 未设 | 性能采样率；**开启后** API 请求作为 `http.client` span 上报。不设则不采集性能 |
 | `tracesSampler` | `function` | — | 动态采样回调，按页面 / 场景返回采样率。**设置后 `tracesSampleRate` 被忽略**（优先级更高） |
 

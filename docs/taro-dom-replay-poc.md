@@ -1,5 +1,18 @@
 # Experimental Taro DOM Replay recorder
 
+## Production phase-one contract
+
+The native mini-program entry remains the only Sentry client. The SDK accepts
+`replaysSessionSampleRate` and `replaysOnErrorSampleRate` for the external
+Replay configuration contract. Its public `beforeSendEvent` callback runs only
+after event processors, `beforeSend`, and error sampling accepted an event and
+immediately before the event envelope is built, so an adapter can add
+`replay_id` without using private client fields.
+
+The separate adapter owns the logical-session sampling decision, bounded
+rolling buffer, error promotion, Replay envelope association, and Taro root
+attach/detach. This file describes the low-level recorder it uses.
+
 ## What this proves
 
 Taro 4.2 maintains a traversable virtual DOM in the logic layer. The opt-in
@@ -45,8 +58,10 @@ and rate-limit behavior; raw DSN uploads are not part of the production path.
 - Capture, network, and DOM-attribute URLs drop query strings, fragments, URL
   user information, and `data:` payloads.
 - Request/response bodies and headers are never synthesized by the recorder.
-- Recordings remain in memory and stop after 30 seconds, 500 events, or roughly
-  512 KiB unless the caller supplies smaller limits.
+- Normal recordings remain in memory and stop after 30 seconds, 500 events, or
+  roughly 512 KiB unless the caller supplies different limits. Error-buffer
+  callers can set `rollingWindowMs`; this rolls by time/event/bytes while
+  preserving the Meta + FullSnapshot checkpoint.
 - Replay IDs are UUIDv4 values and byte limits count UTF-8 bytes.
 
 The low-level API accepts metadata for envelope construction, so direct users
