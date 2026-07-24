@@ -217,6 +217,44 @@ describe('Taro DOM Replay POC', () => {
     expect(controller.addBreadcrumb({ category: 'user.interaction' })).toBe(false);
   });
 
+  it('keeps a recent network summary when identical input mutations exceed the event limit', () => {
+    const observer = observerHarness();
+    const input = element('input', 'input-1', { value: '123' });
+    const controller = startTaroDomReplayPoc({
+      root: element('view', 'root-1', {}, [input]),
+      MutationObserver: observer.MutationObserver,
+      now: () => 4_000,
+      rollingWindowMs: 30_000,
+      maxEvents: 500,
+    });
+
+    controller.addBreadcrumb({
+      timestamp: 4.1,
+      category: 'xhr',
+      data: {
+        url: 'http://eqd-dev.example.test/upgrade/service_status.json',
+        method: 'GET',
+        status_code: 200,
+        duration: 101,
+      },
+    });
+    for (let index = 0; index < 500; index++) {
+      observer.current()?.emit([
+        { type: 'attributes', target: input, attributeName: 'value' },
+      ]);
+    }
+
+    const capture = controller.getCapture();
+    controller.stop();
+    expect(
+      capture.events.some(
+        (event) => event.type === 5 && event.data['tag'] === 'performanceSpan',
+      ),
+    ).toBe(true);
+    expect(capture.events).toHaveLength(3);
+    expect(capture.stats.networkCount).toBe(1);
+  });
+
   it('includes caller-provided Sentry metadata in the capture', () => {
     const observer = observerHarness();
     const controller = startTaroDomReplayPoc({

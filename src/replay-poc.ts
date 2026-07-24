@@ -301,6 +301,8 @@ export function startTaroDomReplayPoc(
   const warnings = new Set<string>();
   const idsBySid = new Map<string, number>();
   const idsByNode = new WeakMap<object, number>();
+  const lastTextValues = new WeakMap<object, string>();
+  const lastAttributeValues = new WeakMap<object, Map<string, string | number | true | null>>();
   let lastEventTimestamp = startedAt - 1;
   let nextNodeId = SYNTHETIC_NODE_MAX_ID + 1;
   let mutationCount = 0;
@@ -352,16 +354,15 @@ export function startTaroDomReplayPoc(
     const result: Record<string, string | number | true | null> = {
       'data-taro-node': normaliseNodeName(node),
     };
+    const remembered = new Map<string, string | number | true | null>();
 
     for (const attribute of toArray(node.attributes)) {
       if (!attribute || !attribute.name || /^on/i.test(attribute.name)) continue;
-      result[attribute.name] = sanitizeAttributeValue(
-        node,
-        attribute.name,
-        attribute.value,
-        maskInputValues,
-      );
+      const value = sanitizeAttributeValue(node, attribute.name, attribute.value, maskInputValues);
+      result[attribute.name] = value;
+      remembered.set(attribute.name, value);
     }
+    lastAttributeValues.set(node, remembered);
 
     return result;
   }
@@ -370,10 +371,14 @@ export function startTaroDomReplayPoc(
     const nodeName = normaliseNodeName(node);
     if (node.nodeType === 3 || nodeName === '#text' || nodeName === 'comment') {
       const comment = nodeName === 'comment';
+      const textContent = maskAllText
+        ? maskValue(node.textContent)
+        : String(node.textContent ?? '');
+      lastTextValues.set(node, textContent);
       return {
         id: idFor(node),
         type: comment ? RrwebNodeType.Comment : RrwebNodeType.Text,
-        textContent: maskAllText ? maskValue(node.textContent) : String(node.textContent ?? ''),
+        textContent,
       };
     }
 
@@ -575,17 +580,33 @@ export function startTaroDomReplayPoc(
     for (const record of records) {
       mutationCount++;
       if (record.type === 'characterData') {
+        const value = maskAllText
+          ? maskValue(record.target.textContent)
+          : String(record.target.textContent ?? '');
+        if (lastTextValues.get(record.target) === value) continue;
+        lastTextValues.set(record.target, value);
         texts.push({
           id: idFor(record.target),
-          value: maskAllText
-            ? maskValue(record.target.textContent)
-            : String(record.target.textContent ?? ''),
+          value,
         });
       } else if (record.type === 'attributes' && record.attributeName) {
+        const value = currentAttributeValue(record.target, record.attributeName);
+        let remembered = lastAttributeValues.get(record.target);
+        if (!remembered) {
+          remembered = new Map<string, string | number | true | null>();
+          lastAttributeValues.set(record.target, remembered);
+        }
+        if (
+          remembered.has(record.attributeName) &&
+          remembered.get(record.attributeName) === value
+        ) {
+          continue;
+        }
+        remembered.set(record.attributeName, value);
         attributes.push({
           id: idFor(record.target),
           attributes: {
-            [record.attributeName]: currentAttributeValue(record.target, record.attributeName),
+            [record.attributeName]: value,
           },
         });
       } else if (record.type === 'childList') {
