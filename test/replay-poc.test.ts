@@ -320,6 +320,30 @@ describe('Taro DOM Replay POC', () => {
     controller.stop();
   });
 
+  it('adds a full snapshot checkpoint after an element subtree is inserted', () => {
+    const observer = observerHarness();
+    const root = element('view', 'root-1');
+    const controller = startTaroDomReplayPoc({
+      root,
+      MutationObserver: observer.MutationObserver,
+      maskAllText: false,
+      now: () => 2_100,
+    });
+    const added = element('view', 'child-1', {}, [textNode('new child', 'text-new')]);
+    added.parentNode = root;
+    root.childNodes?.push(added);
+
+    observer.current()?.emit([
+      { type: 'childList', target: root, addedNodes: [added], removedNodes: [] },
+    ]);
+
+    const events = controller.getCapture().events;
+    expect(mutationData(events[2] as TaroReplayPocEvent).adds).toHaveLength(1);
+    expect(events[3]?.type).toBe(2);
+    expect(JSON.stringify(events[3])).toContain('new child');
+    controller.stop();
+  });
+
   it('allows privacy-safe text opt-out and strips URL secrets from captures', () => {
     const observer = observerHarness();
     const image = element('image', 'image-1', {

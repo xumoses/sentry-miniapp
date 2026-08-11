@@ -569,6 +569,7 @@ export function startTaroDomReplayPoc(
 
   function handleMutations(records: TaroReplayMutationRecordLike[]): void {
     if (stopped) return;
+    let needsStructuralCheckpoint = false;
     const texts: Array<{ id: number; value: string }> = [];
     const attributes: Array<{
       id: number;
@@ -615,6 +616,7 @@ export function startTaroDomReplayPoc(
           removes.push({ parentId, id: idFor(removedNode) });
         }
         for (const addedNode of toArray(record.addedNodes)) {
+          if (addedNode.nodeType === 1) needsStructuralCheckpoint = true;
           adds.push({
             parentId,
             nextId: record.nextSibling ? idFor(record.nextSibling) : null,
@@ -638,6 +640,16 @@ export function startTaroDomReplayPoc(
         adds,
       },
     });
+    if (needsStructuralCheckpoint) {
+      addEvent({
+        type: RrwebEventType.FullSnapshot,
+        timestamp: nextTimestamp(),
+        data: {
+          node: fullSnapshot(),
+          initialOffset: { top: 0, left: 0 },
+        },
+      });
+    }
   }
 
   function stop(reason = 'manual'): TaroReplayPocCapture {
