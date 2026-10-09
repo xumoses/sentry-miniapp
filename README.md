@@ -180,7 +180,7 @@ Sentry.captureFeedback({ message: '页面卡住了', name: '张三', email: 'zha
 - **必须在 `onError` 里手动上报吗？** 不用，`init` 会自动挂全局错误监听。
 - **网络请求会随错误上报吗？** 会，默认开启，记成 `category: xhr` 面包屑随错误一起发。
 - **uni-app（Vue）组件内错误上报率很低？** Vue 吞掉了组件错误，需接 `app.config.errorHandler`；Taro（React）用错误边界。
-- **支持 Session Replay 吗？** 原生小程序仍不支持；Taro 4.2 提供显式启用的实验性 DOM Replay recorder，默认集成不会开启它。
+- **支持 Session Replay 吗？** 原生小程序仍不支持；Taro 4.2 提供显式启用的实验性 DOM Replay recorder，默认集成不会开启它。 密码输入始终遮罩，即使关闭普通输入遮罩；带显示/隐藏密码开关的登录字段应固定添加 `data-sentry-mask="true"`。详见[实验性 Replay 文档](docs/taro-dom-replay-poc.md)。
 - **H5 端怎么办？** 用官方 `@sentry/browser`，按端条件编译引入。
 
 > 每条的完整解答见 **[文档站 · 常见问题](https://sentry-miniapp.pages.dev/guide/faq)**。

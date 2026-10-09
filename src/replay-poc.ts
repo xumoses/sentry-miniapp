@@ -139,6 +139,7 @@ export interface StartTaroDomReplayPocOptions {
   height?: number;
   /** Masks every Taro text node by default. Set to false only for privacy-safe content. */
   maskAllText?: boolean;
+  /** Masks ordinary inputs by default; password and explicitly marked inputs always stay masked. */
   maskInputValues?: boolean;
   maxDurationMs?: number;
   maxEvents?: number;
@@ -178,6 +179,7 @@ const TAG_MAP: Record<string, string> = {
 const SELF_CLOSING_TAGS = new Set(['img', 'input']);
 const SYNTHETIC_NODE_MAX_ID = 9;
 const URL_ATTRIBUTE_NAMES = new Set(['action', 'formaction', 'href', 'poster', 'src']);
+const INPUT_MASK_ATTRIBUTE_NAMES = new Set(['password', 'type', 'data-sentry-mask']);
 const SENSITIVE_ATTRIBUTE_NAME =
   /(?:authorization|cookie|token|password|passwd|secret|api[-_]?key|open[-_]?id|union[-_]?id|phone|email|idcard|user[-_]?id|account)/i;
 
@@ -216,6 +218,21 @@ function maskValue(value: unknown): string {
 function isInputNode(node: TaroReplayNodeLike): boolean {
   const nodeName = normaliseNodeName(node);
   return nodeName === 'input' || nodeName === 'textarea';
+}
+
+function rawAttributeValue(node: TaroReplayNodeLike, name: string): unknown {
+  const attribute = toArray(node.attributes).find(
+    (item) => item && typeof item.name === 'string' && item.name.toLowerCase() === name,
+  );
+  if (attribute) return attribute.value;
+  if (node.hasAttribute && !node.hasAttribute(name)) return undefined;
+  const value = node.getAttribute?.(name);
+  return !node.hasAttribute && value === '' ? undefined : value;
+}
+
+function hasMaskingFlag(node: TaroReplayNodeLike, name: string): boolean {
+  const value = rawAttributeValue(node, name);
+  return value === true || value === 1 || value === '' || value === 'true' || value === '1';
 }
 
 function sanitizeAttributeValue(
@@ -298,6 +315,20 @@ export function startTaroDomReplayPoc(
   const maxBytes = options.maxBytes ?? 512 * 1024;
   const maskAllText = options.maskAllText !== false;
   const maskInputValues = options.maskInputValues !== false;
+  const sensitiveInputs = new WeakSet<TaroReplayNodeLike>();
+
+  function shouldMaskInputValues(node: TaroReplayNodeLike): boolean {
+    if (!isInputNode(node)) return false;
+    if (
+      hasMaskingFlag(node, 'password') ||
+      String(rawAttributeValue(node, 'type') ?? '').toLowerCase() === 'password' ||
+      hasMaskingFlag(node, 'data-sentry-mask')
+    ) {
+      // A password reveal toggle must not turn this recording's password field into clear text.
+      sensitiveInputs.add(node);
+    }
+    return maskInputValues || sensitiveInputs.has(node);
+  }
   const warnings = new Set<string>();
   const idsBySid = new Map<string, number>();
   const idsByNode = new WeakMap<object, number>();
@@ -355,10 +386,16 @@ export function startTaroDomReplayPoc(
       'data-taro-node': normaliseNodeName(node),
     };
     const remembered = new Map<string, string | number | true | null>();
+    const maskNodeInputValues = shouldMaskInputValues(node);
 
     for (const attribute of toArray(node.attributes)) {
       if (!attribute || !attribute.name || /^on/i.test(attribute.name)) continue;
-      const value = sanitizeAttributeValue(node, attribute.name, attribute.value, maskInputValues);
+      const value = sanitizeAttributeValue(
+        node,
+        attribute.name,
+        attribute.value,
+        maskNodeInputValues,
+      );
       result[attribute.name] = value;
       remembered.set(attribute.name, value);
     }
@@ -562,9 +599,11 @@ export function startTaroDomReplayPoc(
     if (attributeName !== 'style' && node.hasAttribute && !node.hasAttribute(attributeName)) {
       return null;
     }
-    const raw = node.getAttribute ? node.getAttribute(attributeName) : null;
+    const raw = node.getAttribute
+      ? node.getAttribute(attributeName)
+      : rawAttributeValue(node, attributeName);
     if (attributeName === 'style' && (raw === null || raw === undefined || raw === '')) return null;
-    return sanitizeAttributeValue(node, attributeName, raw, maskInputValues);
+    return sanitizeAttributeValue(node, attributeName, raw, shouldMaskInputValues(node));
   }
 
   function handleMutations(records: TaroReplayMutationRecordLike[]): void {
@@ -597,19 +636,28 @@ export function startTaroDomReplayPoc(
           remembered = new Map<string, string | number | true | null>();
           lastAttributeValues.set(record.target, remembered);
         }
+        const changedAttributes: Record<string, string | number | true | null> = {};
         if (
-          remembered.has(record.attributeName) &&
-          remembered.get(record.attributeName) === value
+          !remembered.has(record.attributeName) ||
+          remembered.get(record.attributeName) !== value
         ) {
-          continue;
+          remembered.set(record.attributeName, value);
+          changedAttributes[record.attributeName] = value;
         }
-        remembered.set(record.attributeName, value);
-        attributes.push({
-          id: idFor(record.target),
-          attributes: {
-            [record.attributeName]: value,
-          },
-        });
+        if (
+          isInputNode(record.target) &&
+          INPUT_MASK_ATTRIBUTE_NAMES.has(record.attributeName.toLowerCase())
+        ) {
+          // Changing an input into a password can require masking its existing value,
+          // even when Taro does not emit a separate value mutation.
+          const inputValue = currentAttributeValue(record.target, 'value');
+          if (!remembered.has('value') || remembered.get('value') !== inputValue) {
+            remembered.set('value', inputValue);
+            changedAttributes['value'] = inputValue;
+          }
+        }
+        if (!Object.keys(changedAttributes).length) continue;
+        attributes.push({ id: idFor(record.target), attributes: changedAttributes });
       } else if (record.type === 'childList') {
         const parentId = idFor(record.target);
         for (const removedNode of toArray(record.removedNodes)) {

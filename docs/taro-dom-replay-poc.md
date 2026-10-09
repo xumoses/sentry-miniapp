@@ -53,8 +53,15 @@ and rate-limit behavior; raw DSN uploads are not part of the production path.
 
 - All text nodes and text mutations are masked by default. Set `maskAllText:
   false` only for known synthetic content.
-- Input values and common credential/identifier attributes are masked by
-  default.
+- Ordinary input values are masked by default. With `maskInputValues: false`,
+  ordinary input values remain visible while password values always stay masked.
+  Password fields are detected from Taro `password: true`, HTML `type: "password"`,
+  or an explicit `data-sentry-mask="true"` attribute. Keep that explicit marker on
+  login inputs even when their password reveal toggle is already enabled when
+  recording starts. Once identified, an input stays masked for the rest of that
+  recording, including value mutations and password/type changes.
+- Common credential/identifier attributes stay filtered independently of the
+  text/input masking settings.
 - Capture, network, and DOM-attribute URLs drop query strings, fragments, URL
   user information, and `data:` payloads.
 - Request/response bodies and headers are never synthesized by the recorder.

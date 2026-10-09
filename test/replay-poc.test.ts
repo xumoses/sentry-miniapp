@@ -320,6 +320,122 @@ describe('Taro DOM Replay POC', () => {
     controller.stop();
   });
 
+  it.each([
+    { password: true },
+    { password: 'true' },
+    { type: 'password' },
+    { type: 'PASSWORD' },
+    { 'data-sentry-mask': true, password: false },
+    { 'data-sentry-mask': 'true' },
+    { 'data-sentry-mask': '' },
+  ])('always masks password/marked input snapshots and mutations: %j', (props) => {
+    const observer = observerHarness();
+    const input = element('input', 'password-input', { ...props, value: 'test-secret' });
+    const controller = startTaroDomReplayPoc({
+      root: input,
+      MutationObserver: observer.MutationObserver,
+      maskAllText: false,
+      maskInputValues: false,
+      now: () => 2_025,
+    });
+    expect(
+      findNode(fullSnapshotNode(controller.getCapture().events), (node) => node.tagName === 'input')
+        ?.attributes?.['value'],
+    ).toBe('***********');
+
+    input.props['value'] = 'new-secret';
+    observer.current()?.emit([{ type: 'attributes', target: input, attributeName: 'value' }]);
+    expect(
+      mutationData(controller.getCapture().events[2] as TaroReplayPocEvent).attributes,
+    ).toEqual([expect.objectContaining({ attributes: { value: '**********' } })]);
+    expect(JSON.stringify(controller.getCapture().events)).not.toContain('test-secret');
+    expect(JSON.stringify(controller.getCapture().events)).not.toContain('new-secret');
+    controller.stop();
+  });
+
+  it('keeps ordinary text and input values visible when global masking is disabled', () => {
+    const observer = observerHarness();
+    const text = textNode('visible label', 'visible-text');
+    const input = element('input', 'visible-input', {
+      value: 'visible input',
+      password: false,
+      type: 'text',
+      'data-sentry-mask': false,
+    });
+    const root = element('view', 'visible-root', {}, [text, input]);
+    const controller = startTaroDomReplayPoc({
+      root,
+      MutationObserver: observer.MutationObserver,
+      maskAllText: false,
+      maskInputValues: false,
+      now: () => 2_050,
+    });
+    const initial = fullSnapshotNode(controller.getCapture().events);
+    expect(findNode(initial, (node) => node.type === 3 && node.id >= 10)?.textContent).toBe(
+      'visible label',
+    );
+    expect(findNode(initial, (node) => node.tagName === 'input')?.attributes?.['value']).toBe(
+      'visible input',
+    );
+    text.textContent = 'changed label';
+    input.props['value'] = 'changed input';
+    observer.current()?.emit([
+      { type: 'characterData', target: text },
+      { type: 'attributes', target: input, attributeName: 'value' },
+    ]);
+    const mutation = mutationData(controller.getCapture().events[2] as TaroReplayPocEvent);
+    expect(mutation.texts).toEqual([expect.objectContaining({ value: 'changed label' })]);
+    expect(mutation.attributes).toEqual([
+      expect.objectContaining({ attributes: { value: 'changed input' } }),
+    ]);
+    controller.stop();
+  });
+
+  it.each([
+    { name: 'password', enabled: true, revealed: false },
+    { name: 'type', enabled: 'password', revealed: 'text' },
+    { name: 'data-sentry-mask', enabled: true, revealed: false },
+  ])('updates existing values and keeps revealed password fields masked: $name', (attribute) => {
+    const observer = observerHarness();
+    const input = element('input', 'toggle-input', {
+      value: 'public',
+      [attribute.name]: attribute.revealed,
+    });
+    const controller = startTaroDomReplayPoc({
+      root: input,
+      MutationObserver: observer.MutationObserver,
+      maskAllText: false,
+      maskInputValues: false,
+      now: () => 2_075,
+    });
+    input.props[attribute.name] = attribute.enabled;
+    observer
+      .current()
+      ?.emit([{ type: 'attributes', target: input, attributeName: attribute.name }]);
+    expect(
+      mutationData(controller.getCapture().events[2] as TaroReplayPocEvent).attributes,
+    ).toEqual([
+      expect.objectContaining({ attributes: expect.objectContaining({ value: '******' }) }),
+    ]);
+
+    input.props[attribute.name] = attribute.revealed;
+    input.props['value'] = 'hidden-secret';
+    observer.current()?.emit([
+      { type: 'attributes', target: input, attributeName: attribute.name },
+      { type: 'attributes', target: input, attributeName: 'value' },
+    ]);
+    const changed = mutationData(controller.getCapture().events[3] as TaroReplayPocEvent);
+    expect(changed.attributes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          attributes: expect.objectContaining({ value: '*************' }),
+        }),
+      ]),
+    );
+    expect(JSON.stringify(controller.getCapture().events)).not.toContain('hidden-secret');
+    controller.stop();
+  });
+
   it('adds a full snapshot checkpoint after an element subtree is inserted', () => {
     const observer = observerHarness();
     const root = element('view', 'root-1');

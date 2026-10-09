@@ -183,7 +183,7 @@ Sentry.captureFeedback({ message: 'The page is frozen', name: 'John Doe', email:
 - **Must I report manually in `onError`?** No — `init` hooks the global error listeners automatically.
 - **Are network requests included with errors?** Yes, on by default — recorded as `category: xhr` breadcrumbs shipped with the error.
 - **uni-app (Vue) component errors rarely reported?** Vue swallows component errors; wire `app.config.errorHandler`. Taro (React) uses an Error Boundary.
-- **Session Replay?** Native mini programs remain unsupported; Taro 4.2 has an explicitly enabled experimental DOM Replay recorder which is never part of the default integrations.
+- **Session Replay?** Native mini programs remain unsupported; Taro 4.2 has an explicitly enabled experimental DOM Replay recorder which is never part of the default integrations. Password inputs always stay masked even when ordinary input masking is disabled. Keep `data-sentry-mask="true"` on login fields with a password reveal toggle; see the [experimental Replay guide](docs/taro-dom-replay-poc.md).
 - **H5 build?** Use official `@sentry/browser`, branched via conditional compilation.
 
 > Full answers on the **[docs site · FAQ](https://sentry-miniapp.pages.dev/guide/faq)**.
