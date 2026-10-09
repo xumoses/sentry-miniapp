@@ -5,6 +5,7 @@ import {
   type TaroReplayMutationRecordLike,
   type TaroReplayNodeLike,
   type TaroReplayPocEvent,
+  type TaroReplayScrollEventLike,
 } from '../src/replay-poc';
 
 interface TestElement extends TaroReplayNodeLike {
@@ -58,6 +59,29 @@ function element(
   return node;
 }
 
+function scrollHarness() {
+  const listeners = new Set<(event: TaroReplayScrollEventLike) => void>();
+  const node = Object.assign(element('scroll-view', 'scroll', { scrollY: true }), {
+    addEventListener: jest.fn(
+      (name: string, listener: (event: TaroReplayScrollEventLike) => void) => {
+        if (name === 'scroll') listeners.add(listener);
+      },
+    ),
+    removeEventListener: jest.fn(
+      (name: string, listener: (event: TaroReplayScrollEventLike) => void) => {
+        if (name === 'scroll') listeners.delete(listener);
+      },
+    ),
+  });
+  return {
+    node,
+    listeners,
+    emit: (event: TaroReplayScrollEventLike) => {
+      for (const listener of listeners) listener(event);
+    },
+  };
+}
+
 function findNode(
   root: SerializedTestNode,
   predicate: (node: SerializedTestNode) => boolean,
@@ -105,6 +129,380 @@ function observerHarness() {
 }
 
 describe('Taro DOM Replay POC', () => {
+  it('retains observed native scroll offsets across recorder restart on the same mounted root', () => {
+    const observer = observerHarness();
+    const scroll = scrollHarness();
+    const options = { root: scroll.node, MutationObserver: observer.MutationObserver };
+    const first = startTaroDomReplayPoc(options);
+    scroll.emit({ detail: { scrollTop: 420, scrollLeft: 12 } });
+    first.stop('error');
+    expect(scroll.listeners.size).toBe(0);
+    const second = startTaroDomReplayPoc(options);
+    const snapshot = fullSnapshotNode(second.getCapture().events);
+    second.stop();
+    const replayScroll = findNode(
+      snapshot,
+      (node) => node.attributes?.['data-taro-node'] === 'scroll-view',
+    );
+    expect(replayScroll?.attributes).toMatchObject({ rr_scrollTop: 420, rr_scrollLeft: 12 });
+    expect(scroll.listeners.size).toBe(0);
+  });
+
+  it('attaches inserted scroll views and cleans up listeners when their subtree is removed', () => {
+    const observer = observerHarness();
+    const root = element('view', 'root');
+    const scroll = scrollHarness();
+    const applicationListener = jest.fn();
+    scroll.listeners.add(applicationListener);
+    const controller = startTaroDomReplayPoc({ root, MutationObserver: observer.MutationObserver });
+    const wrapper = element('view', 'wrapper', {}, [scroll.node]);
+    root.childNodes?.push(wrapper);
+    wrapper.parentNode = root;
+    observer.current()?.emit([{ type: 'childList', target: root, addedNodes: [wrapper] }]);
+    expect(scroll.listeners.size).toBe(2);
+    scroll.emit({ detail: { scrollTop: 100, scrollLeft: 0 } });
+    const beforeRemoval = controller
+      .getCapture()
+      .events.filter((event) => event.data['source'] === 3);
+    expect(beforeRemoval).toHaveLength(1);
+    root.childNodes?.pop();
+    observer.current()?.emit([{ type: 'childList', target: root, removedNodes: [wrapper] }]);
+    expect(scroll.listeners.size).toBe(1);
+    scroll.emit({ detail: { scrollTop: 200, scrollLeft: 0 } });
+    const capture = controller.stop();
+    expect(capture.events.filter((event) => event.data['source'] === 3)).toEqual(beforeRemoval);
+    expect(applicationListener).toHaveBeenCalledTimes(2);
+  });
+
+  it('deduplicates scroll offsets, rejects invalid coordinates and observes the existing event cap', () => {
+    const observer = observerHarness();
+    const scroll = scrollHarness();
+    const controller = startTaroDomReplayPoc({
+      root: scroll.node,
+      MutationObserver: observer.MutationObserver,
+      maxEvents: 3,
+    });
+    scroll.emit({ detail: { scrollTop: 100, scrollLeft: 0 } });
+    scroll.emit({ detail: { scrollTop: 100, scrollLeft: 0 } });
+    scroll.emit({ detail: { scrollTop: -1, scrollLeft: Number.NaN } });
+    scroll.emit({ detail: { scrollTop: Number.POSITIVE_INFINITY, scrollLeft: -1 } });
+    expect(controller.getCapture().events).toHaveLength(3);
+    scroll.emit({ detail: { scrollTop: 200, scrollLeft: 0 } });
+    expect(controller.getCapture().stopReason).toBe('limit');
+    expect(scroll.listeners.size).toBe(0);
+  });
+
+  it('skips unsupported or throwing native scroll listener APIs without changing recorder lifecycle', () => {
+    const observer = observerHarness();
+    const root = element('view', 'root', {}, [
+      element('scroll-view', 'no-event-api', { scrollY: true }),
+      Object.assign(element('scroll-view', 'throws', { scrollY: true }), {
+        addEventListener: () => {
+          throw new Error('Unsupported');
+        },
+        removeEventListener: jest.fn(),
+      }),
+    ]);
+    const controller = startTaroDomReplayPoc({ root, MutationObserver: observer.MutationObserver });
+    expect(controller.getCapture().stopReason).toBeNull();
+    expect(controller.stop().stopReason).toBe('manual');
+    expect(observer.current()?.disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('records native scroll-view offsets without replacing the application listener', () => {
+    const observer = observerHarness();
+    const listeners = new Set<
+      (event: { detail: { scrollTop: number; scrollLeft: number } }) => void
+    >();
+    const applicationListener = jest.fn();
+    listeners.add(applicationListener);
+    const scroll = Object.assign(element('scroll-view', 'scroll', { scrollY: true }), {
+      addEventListener: jest.fn(
+        (
+          name: string,
+          callback: (event: { detail: { scrollTop: number; scrollLeft: number } }) => void,
+        ) => {
+          if (name === 'scroll') listeners.add(callback);
+        },
+      ),
+      removeEventListener: jest.fn(
+        (
+          name: string,
+          callback: (event: { detail: { scrollTop: number; scrollLeft: number } }) => void,
+        ) => {
+          if (name === 'scroll') listeners.delete(callback);
+        },
+      ),
+    });
+    const controller = startTaroDomReplayPoc({
+      root: element('view', 'root', {}, [scroll]),
+      MutationObserver: observer.MutationObserver,
+    });
+    const snapshot = fullSnapshotNode(controller.getCapture().events);
+    const scrollNode = findNode(
+      snapshot,
+      (node) => node.attributes?.['data-taro-node'] === 'scroll-view',
+    );
+    const event = { detail: { scrollTop: 350, scrollLeft: 12 } };
+    for (const listener of listeners) listener(event);
+    const capture = controller.stop();
+    expect(applicationListener).toHaveBeenCalledWith(event);
+    expect(capture.events.filter((item) => item.type === 3 && item.data['source'] === 3)).toEqual([
+      expect.objectContaining({
+        data: { source: 3, id: scrollNode?.id, x: 12, y: 350 },
+      }),
+    ]);
+    expect(listeners.size).toBe(1);
+    expect(listeners.has(applicationListener)).toBe(true);
+  });
+
+  it('stores controlled scroll offsets in the FullSnapshot for playback restoration', () => {
+    const observer = observerHarness();
+    const controller = startTaroDomReplayPoc({
+      root: element('scroll-view', 'scroll', { scrollY: true, scrollTop: 350, scrollLeft: 12 }),
+      MutationObserver: observer.MutationObserver,
+    });
+    const snapshot = fullSnapshotNode(controller.getCapture().events);
+    controller.stop();
+    const scrollNode = findNode(
+      snapshot,
+      (node) => node.attributes?.['data-taro-node'] === 'scroll-view',
+    );
+    expect(scrollNode?.attributes).toMatchObject({ rr_scrollTop: 350, rr_scrollLeft: 12 });
+  });
+
+  it('replaces an old rolling checkpoint when compiled CSS makes two snapshots exceed the byte cap', () => {
+    const observer = observerHarness();
+    const text = textNode('before', 'text');
+    const root = element('view', 'root', {}, [text], 'color:red');
+    const options = {
+      root,
+      MutationObserver: observer.MutationObserver,
+      stylesheet: `/*${'x'.repeat(300 * 1_024)}*/`,
+      maskAllText: false,
+      rollingWindowMs: 30_000,
+      maxBytes: 512 * 1_024,
+      now: () => 1_000,
+    };
+    const controller = startTaroDomReplayPoc(options);
+    const replayId = controller.getCapture().replayId;
+    text.textContent = 'current';
+    root.styleText = 'color:blue';
+    const child = element('view', 'added', {}, [textNode('added child', 'added-text')]);
+    root.childNodes?.push(child);
+    child.parentNode = root;
+    observer.current()?.emit([
+      { type: 'characterData', target: text },
+      { type: 'attributes', target: root, attributeName: 'style' },
+      { type: 'childList', target: root, addedNodes: [child] },
+    ]);
+    const checkpointCapture = controller.getCapture();
+    const checkpoint = fullSnapshotNode(checkpointCapture.events);
+    expect(findNode(checkpoint, (node) => node.textContent === 'current')).toBeDefined();
+    expect(findNode(checkpoint, (node) => node.textContent === 'added child')).toBeDefined();
+    expect(
+      findNode(checkpoint, (node) => node.attributes?.['data-taro-node'] === 'view')?.attributes?.[
+        'style'
+      ],
+    ).toBe('color:blue');
+    expect(checkpointCapture.events.map((event) => event.type)).toEqual([4, 2]);
+    expect(checkpointCapture.events[0]?.timestamp).toBe(
+      (checkpointCapture.events[1]?.timestamp || 0) - 1,
+    );
+    text.textContent = 'after checkpoint';
+    observer.current()?.emit([{ type: 'characterData', target: text }]);
+    const capture = controller.stop();
+    expect(capture.replayId).toBe(replayId);
+    const recordedText = findNode(checkpoint, (node) => node.textContent === 'current');
+    expect(mutationData(capture.events[2] as TaroReplayPocEvent).texts).toEqual([
+      { id: recordedText?.id, value: 'after checkpoint' },
+    ]);
+    expect(capture.stats.approximateBytes).toBeLessThanOrEqual(options.maxBytes);
+    expect(capture.stats.approximateBytes).toBe(
+      capture.events.reduce(
+        (bytes, event) => bytes + Buffer.byteLength(JSON.stringify(event), 'utf8'),
+        0,
+      ),
+    );
+  });
+
+  it('lets native input padding and borders add to its line-height', () => {
+    const observer = observerHarness();
+    const input = element('input', 'input', {}, [], 'padding:8px;border:1px solid #ccc');
+    const controller = startTaroDomReplayPoc({
+      root: input,
+      MutationObserver: observer.MutationObserver,
+    });
+    const snapshot = fullSnapshotNode(controller.getCapture().events);
+    controller.stop();
+    const css = findNode(snapshot, (node) => node.tagName === 'style')?.childNodes?.[0]
+      ?.textContent;
+    expect(css).toMatch(/\[data-taro-node="input"\]\{[^}]*height:auto;min-height:1\.4rem/);
+    expect(findNode(snapshot, (node) => node.tagName === 'input')?.attributes?.['style']).toBe(
+      'padding:8px;border:1px solid #ccc',
+    );
+  });
+
+  it.each([undefined, 30_000])(
+    'keeps injected stylesheet bytes within the recorder cap in rolling mode %s and skips observation after a limit stop',
+    (rollingWindowMs) => {
+      const observer = observerHarness();
+      const options = {
+        root: element('view', 'root'),
+        MutationObserver: observer.MutationObserver,
+        stylesheet: '.fixture{color:red}'.repeat(1_000),
+        maxBytes: 4_096,
+        ...(rollingWindowMs === undefined ? {} : { rollingWindowMs }),
+      };
+      const controller = startTaroDomReplayPoc(options);
+      const capture = controller.getCapture();
+      expect(capture.stopReason).toBe('limit');
+      expect(capture.stats.approximateBytes).toBeLessThanOrEqual(options.maxBytes);
+      expect(observer.current()).toBeUndefined();
+    },
+  );
+
+  it('preserves native content-box views so status-bar padding adds to the navigation height', () => {
+    const observer = observerHarness();
+    const root = element('view', 'navigation', {}, [], 'height:44px;padding-top:47px');
+    const controller = startTaroDomReplayPoc({ root, MutationObserver: observer.MutationObserver });
+    const snapshot = fullSnapshotNode(controller.getCapture().events);
+    controller.stop();
+    const css = findNode(snapshot, (node) => node.tagName === 'style')?.childNodes?.[0]
+      ?.textContent;
+    expect(css).toMatch(/\[data-taro-node="view"\],\[data-taro-node="root"\]\{display:block\}/);
+    expect(
+      findNode(snapshot, (node) => node.attributes?.['data-taro-node'] === 'view')?.attributes?.[
+        'style'
+      ],
+    ).toBe('height:44px;padding-top:47px');
+  });
+
+  it('keeps compiled page styles and mini-program button layout in the full snapshot', () => {
+    const observer = observerHarness();
+    const options = {
+      root: element('view', 'header', { class: 'compiled-header' }, [
+        element('button', 'button', {}, [textNode('Increment', 'button-label')]),
+      ]),
+      MutationObserver: observer.MutationObserver,
+      width: 390,
+      stylesheet:
+        '.compiled-header{position:fixed;top:20rpx;background:#d20a10}' +
+        '.font-literal{font-size:34rpx;width:34rpx;--font-size:34rpx;content:"font-size:34rpx"}' +
+        '.font-complex{font-size:calc(34rpx + 1px)}',
+    };
+    const controller = startTaroDomReplayPoc(options);
+    const snapshot = fullSnapshotNode(controller.getCapture().events);
+    controller.stop();
+    const css = findNode(snapshot, (node) => node.tagName === 'style')?.childNodes?.[0]
+      ?.textContent;
+    expect(css).toContain('.compiled-header{position:fixed;top:10.4px;background:#d20a10}');
+    expect(css).toContain(
+      'html,body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.4}',
+    );
+    expect(css).toContain(
+      '.font-literal{font-size:17px;width:17.68px;--font-size:17.68px;content:"font-size:34rpx"}',
+    );
+    expect(css).toContain('.font-complex{font-size:calc(17.68px + 1px)}');
+    expect(css).toMatch(
+      /\[data-taro-node="button"\]\{[^}]*display:block[^}]*width:100%;width:-webkit-fill-available;width:stretch/,
+    );
+    expect(css).toMatch(/\[data-taro-node="button"\]\[size="mini"\]\{[^}]*width:auto/);
+    expect(css).toMatch(
+      /\[data-taro-node="button"\]\{[^}]*font-family:serif[^}]*font-size:18px[^}]*line-height:2\.55555556/,
+    );
+    expect(css).toContain('[data-taro-node="button"]::after');
+    expect(css).toContain('[data-taro-node="button"][type="primary"]');
+    expect(css).toContain('[data-taro-node="button"][type="warn"]');
+    expect(css).toContain('[data-taro-node="button"][type="warn"]{color:#fff;background:#e64340}');
+    expect(css).toContain(
+      '[data-taro-node="button"][plain][type="warn"]{color:#e64340;border-color:#e64340}',
+    );
+    expect(css).toContain('[data-taro-node="button"][disabled]');
+    expect(css).toMatch(/\[data-taro-node="input"\]\{[^}]*min-height:1\.4rem/);
+    expect(css).toMatch(/\[data-taro-node="input"\]\{[^}]*font-size:12px/);
+    expect(css).toMatch(/\[data-taro-node="textarea"\]\{[^}]*box-sizing:border-box/);
+    expect(css).toContain('[data-taro-node="scroll-view"][scrolly="true"]');
+    controller.stop();
+  });
+
+  it('converts rpx for inline snapshots, added children and subsequent style mutations', () => {
+    const observer = observerHarness();
+    const root = element('view', 'root', {}, [], 'padding:20rpx;width:750rpx');
+    const controller = startTaroDomReplayPoc({
+      root,
+      MutationObserver: observer.MutationObserver,
+      width: 390,
+    });
+    const initial = fullSnapshotNode(controller.getCapture().events);
+    expect(
+      findNode(initial, (node) => node.attributes?.['data-taro-node'] === 'view')?.attributes?.[
+        'style'
+      ],
+    ).toBe('padding:10.4px;width:390px');
+    root.styleText = 'margin-left:-10rpx;padding:.5rpx';
+    const child = element('view', 'added', {}, [], 'height:100rpx');
+    root.childNodes?.push(child);
+    child.parentNode = root;
+    observer.current()?.emit([
+      { type: 'attributes', target: root, attributeName: 'style' },
+      { type: 'childList', target: root, addedNodes: [child] },
+    ]);
+    const data = mutationData(controller.getCapture().events[2] as TaroReplayPocEvent);
+    controller.stop();
+    expect(data.attributes).toEqual([
+      expect.objectContaining({ attributes: { style: 'margin-left:-5.2px;padding:0.26px' } }),
+    ]);
+    expect(data.adds[0]?.node.attributes?.['style']).toBe('height:52px');
+    controller.stop();
+  });
+
+  it('normalizes className snapshots and mutations to the playback class attribute', () => {
+    const observer = observerHarness();
+    const root = element('view', 'root', { className: 'compiled-header' });
+    const controller = startTaroDomReplayPoc({
+      root,
+      MutationObserver: observer.MutationObserver,
+    });
+    const replayRoot = findNode(
+      fullSnapshotNode(controller.getCapture().events),
+      (node) => node.attributes?.['data-taro-node'] === 'view',
+    );
+    expect(replayRoot?.attributes?.['class']).toBe('compiled-header');
+    expect(replayRoot?.attributes).not.toHaveProperty('className');
+    root.props['className'] = 'compiled-header active';
+    observer.current()?.emit([{ type: 'attributes', target: root, attributeName: 'className' }]);
+    expect(
+      mutationData(controller.getCapture().events[2] as TaroReplayPocEvent).attributes,
+    ).toEqual([expect.objectContaining({ attributes: { class: 'compiled-header active' } })]);
+    controller.stop();
+  });
+
+  it('uses the default viewport for rpx and leaves CSS strings and URLs intact', () => {
+    const observer = observerHarness();
+    const options = {
+      root: element('view', 'root', {}, [], 'padding:20rpx;background:url("/20rpx.png")'),
+      MutationObserver: observer.MutationObserver,
+      stylesheet:
+        '.fixture{padding:20rpx;content:"20rpx";background:url(/20rpx.png)} .quoted{background:url(\'/assets/foo)width=20rpx.png\')}',
+    };
+    const controller = startTaroDomReplayPoc(options);
+    const snapshot = fullSnapshotNode(controller.getCapture().events);
+    controller.stop();
+    expect(
+      findNode(snapshot, (node) => node.tagName === 'style')?.childNodes?.[0]?.textContent,
+    ).toContain('.fixture{padding:10px;content:"20rpx";background:url(/20rpx.png)}');
+    expect(
+      findNode(snapshot, (node) => node.tagName === 'style')?.childNodes?.[0]?.textContent,
+    ).toContain(".quoted{background:url('/assets/foo)width=20rpx.png')}");
+    expect(
+      findNode(snapshot, (node) => node.attributes?.['data-taro-node'] === 'view')?.attributes?.[
+        'style'
+      ],
+    ).toBe('padding:10px;background:url("/20rpx.png")');
+    controller.stop();
+  });
+
   it('rejects a missing mounted root', () => {
     const observer = observerHarness();
     expect(() =>
@@ -239,17 +637,13 @@ describe('Taro DOM Replay POC', () => {
       },
     });
     for (let index = 0; index < 500; index++) {
-      observer.current()?.emit([
-        { type: 'attributes', target: input, attributeName: 'value' },
-      ]);
+      observer.current()?.emit([{ type: 'attributes', target: input, attributeName: 'value' }]);
     }
 
     const capture = controller.getCapture();
     controller.stop();
     expect(
-      capture.events.some(
-        (event) => event.type === 5 && event.data['tag'] === 'performanceSpan',
-      ),
+      capture.events.some((event) => event.type === 5 && event.data['tag'] === 'performanceSpan'),
     ).toBe(true);
     expect(capture.events).toHaveLength(3);
     expect(capture.stats.networkCount).toBe(1);
@@ -449,9 +843,9 @@ describe('Taro DOM Replay POC', () => {
     added.parentNode = root;
     root.childNodes?.push(added);
 
-    observer.current()?.emit([
-      { type: 'childList', target: root, addedNodes: [added], removedNodes: [] },
-    ]);
+    observer
+      .current()
+      ?.emit([{ type: 'childList', target: root, addedNodes: [added], removedNodes: [] }]);
 
     const events = controller.getCapture().events;
     expect(mutationData(events[2] as TaroReplayPocEvent).adds).toHaveLength(1);
@@ -602,10 +996,7 @@ describe('Taro DOM Replay POC', () => {
     );
     expect(button?.attributes).not.toHaveProperty('onTap');
     expect(
-      findNode(
-        snapshot,
-        (node) => node.attributes?.['data-taro-unsupported'] === 'unknown',
-      ),
+      findNode(snapshot, (node) => node.attributes?.['data-taro-unsupported'] === 'unknown'),
     ).toBeDefined();
     expect(findNode(snapshot, (node) => node.type === 5)?.textContent).toBe('');
     expect(findNode(snapshot, (node) => node.tagName === 'input')?.attributes?.['value']).toBe('');
