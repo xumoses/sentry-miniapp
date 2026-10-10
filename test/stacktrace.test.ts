@@ -3,6 +3,37 @@ import { miniappStackParser } from '../src/stacktrace';
 
 describe('miniappStackParser', () => {
   describe('V8 style stack traces', () => {
+    it('preserves DevTools bundle URLs and caller order', () => {
+      const bundle =
+        'http://127.0.0.1:47848/appservice/getsubpackagebundle_taroMiniapp%2Fpages%2FOption4Fund%2F.js?t=wechat&s=&v=fixture';
+      const stack = [
+        'Error: source probe',
+        `    at r.__validateOptionSource (${bundle}:2140:19)`,
+        '    at <anonymous>:1:68',
+      ].join('\n');
+
+      expect(miniappStackParser(stack)).toEqual([
+        { filename: '<anonymous>', function: '?', in_app: true, lineno: 1, colno: 68 },
+        {
+          filename: bundle,
+          function: 'r.__validateOptionSource',
+          in_app: true,
+          lineno: 2140,
+          colno: 19,
+        },
+      ]);
+    });
+
+    it.each([
+      ['https://usr/pages/index.js?source=dev', 'at https://usr/pages/index.js?source=dev:42:13', '?'],
+      ['app:///pages/index.js', 'at tap (app:///pages/index.js:42:13)', 'tap'],
+      ['tt://pages/index.js', 'at tap (tt://pages/index.js:42:13)', 'tap'],
+    ])('preserves the V8 location %s', (filename, stack, functionName) => {
+      expect(miniappStackParser(stack)).toEqual([
+        { filename, function: functionName, in_app: true, lineno: 42, colno: 13 },
+      ]);
+    });
+
     it('should parse standard V8 stack frames', () => {
       const stack = [
         'Error: test error',
@@ -64,6 +95,34 @@ describe('miniappStackParser', () => {
   });
 
   describe('Safari/JavaScriptCore style stack traces', () => {
+    it.each([
+      {
+        stack: 'handleTap@http://127.0.0.1:47848/appservice/getsubpackagebundle_taroMiniapp%2Fpages%2FSwap%2F.js?t=wechat&s=&v=fixture:6535:19',
+        filename: 'http://127.0.0.1:47848/appservice/getsubpackagebundle_taroMiniapp%2Fpages%2FSwap%2F.js?t=wechat&s=&v=fixture',
+        functionName: 'handleTap', lineno: 6535, colno: 19,
+      },
+      {
+        stack: '@https://usr/taroMiniapp/pages/ReplayPoc/index.js:1:3743',
+        filename: 'https://usr/taroMiniapp/pages/ReplayPoc/index.js',
+        functionName: '?', lineno: 1, colno: 3743,
+      },
+      {
+        stack: 'https://usr/taroMiniapp/pages/ReplayPoc/index.js:1:3743',
+        filename: 'https://usr/taroMiniapp/pages/ReplayPoc/index.js',
+        functionName: '?', lineno: 1, colno: 3743,
+      },
+      {
+        stack: 'onLoad@app:///pages/home/home.js:15',
+        filename: 'app:///pages/home/home.js',
+        functionName: 'onLoad', lineno: 15, colno: undefined,
+      },
+    ])('retains the Safari URL $filename', ({ stack, filename, functionName, lineno, colno }) => {
+      const frames = miniappStackParser(stack);
+      expect(frames).toHaveLength(1);
+      expect(frames[0]).toMatchObject({ filename, function: functionName, in_app: true, lineno });
+      expect(frames[0]!.colno).toBe(colno);
+    });
+
     it('should parse Safari-style frames', () => {
       const stack = [
         'handleTap@pages/index/index.js:42:13',
@@ -106,6 +165,11 @@ describe('miniappStackParser', () => {
       const frames = miniappStackParser('', 0);
       expect(frames).toEqual([]);
     });
+
+    it.each(['Error:123', 'Error:123:45', 'status:200', 'random message:12:3'])(
+      'does not parse a message as a bare Safari location: %s',
+      (message) => expect(miniappStackParser(message)).toEqual([]),
+    );
 
     it('should return empty array for non-stack string', () => {
       const frames = miniappStackParser('just a random message', 0);

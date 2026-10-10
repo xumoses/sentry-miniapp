@@ -18,6 +18,14 @@ export const TARO_REPLAY_BASE_STYLESHEET = [
   '[data-taro-node="textarea"]{display:block;width:300px;height:150px;padding:0;border:0;box-sizing:border-box;font-family:inherit;font-size:16px;line-height:normal;color:inherit;background:transparent}',
   '[data-taro-node="scroll-view"],[data-taro-node="scrollview"]{display:block;width:100%;box-sizing:border-box}',
   '[data-taro-node="scroll-view"][scrolly="true"],[data-taro-node="scrollview"][scrolly="true"],[data-taro-node="scroll-view"][scrolly=""],[data-taro-node="scrollview"][scrolly=""],[data-taro-node="scroll-view"][scroll-y="true"],[data-taro-node="scrollview"][scroll-y="true"]{overflow-y:auto}',
+  '[data-taro-node="root-portal"]{display:contents}',
+  '[data-taro-node="image"][mode="aspectFit"]{object-fit:contain}',
+  '[data-taro-node="image"][mode="aspectFill"]{object-fit:cover}',
+  '[data-taro-node="picker-view"]{position:relative;display:flex;width:100%;height:240px;overflow:hidden}',
+  '[data-taro-node="picker-view"]::after{content:"";position:absolute;left:0;right:0;top:50%;height:var(--taro-replay-picker-item-height,34px);box-sizing:border-box;border-top:1px solid #e5e5e5;border-bottom:1px solid #e5e5e5;transform:translateY(-50%);pointer-events:none}',
+  '[data-taro-node="picker-view"]::before{content:"";position:absolute;inset:0;z-index:1;background:linear-gradient(to bottom,rgba(255,255,255,.95),rgba(255,255,255,0) 40%,rgba(255,255,255,0) 60%,rgba(255,255,255,.95));pointer-events:none}',
+  '[data-taro-node="picker-view-column"]{position:relative;display:block;flex:1;height:100%;overflow:hidden}',
+  '[data-taro-node="picker-view-column"]>[data-taro-picker-row]{position:absolute;left:0;top:calc(50% + (var(--taro-replay-picker-row,0) - var(--taro-replay-picker-selected,0))*var(--taro-replay-picker-item-height,34px));width:100%;height:var(--taro-replay-picker-item-height,34px);box-sizing:border-box;transform:translateY(-50%)}',
   '[data-taro-unsupported]{outline:1px dashed #d20a10}',
 ].join('\n');
 

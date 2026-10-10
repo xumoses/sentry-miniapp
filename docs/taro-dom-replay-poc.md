@@ -75,6 +75,13 @@ When a rolling buffer cannot fit both the previous checkpoint and a newly
 recorded complete snapshot, it retains the new snapshot with an aligned Meta
 event and discards the earlier DOM history already represented by that snapshot.
 The Replay ID remains unchanged, and later mutations refer to the new checkpoint.
+When time, event count or bytes evict older DOM/scroll increments, their changes
+are folded into a cloned baseline before retaining the recent tail. This keeps
+long-lived forms and filtered lists current after the original changes age out.
+The input events are not mutated, Meta precedes its rebased snapshot, and a
+complete checkpoint that cannot fit the cap stops recording, preserving the
+previous compliant event array and statistics rather than retaining the rejected
+oversized increment.
 If even one complete checkpoint exceeds the configured cap, recording stops
 without installing a new observer rather than retaining an oversized payload.
 
@@ -113,6 +120,39 @@ Normal buttons use [stretch sizing](https://www.w3.org/TR/css-sizing-3/) so thei
 margin box fills the parent without overflowing when horizontal margins are set.
 The CSS retains `100%` and `-webkit-fill-available` fallbacks; mini buttons keep
 their intrinsic `auto` width.
+
+## RootPortal and PickerView browser semantics
+
+Enabled `root-portal` subtrees are lifted to the synthetic document body, as the
+native component detaches its subtree from page layout. Disabled portals retain
+their original position. Portal insertion/removal and `enable` changes create a
+complete checkpoint so rrweb never retains a portal under a removed ancestor.
+The virtual Taro tree itself is not changed. Ancestor-dependent CSS selectors or
+custom properties still need host/platform validation after this browser mapping.
+
+`picker-view` retains all original column and option nodes. Browser styles center
+the selected row in each column using `value` or `defaultValue`, native indicator
+height, and per-row offsets. Native `change.detail.value` events update column
+selection without replacing or blocking application handlers. Observed selection
+survives recorder restart on the same live node; controlled prop changes and row
+structural changes create a checkpoint. Hosts without event-listener APIs retain
+the initial selection only. This models the native wheel's rows and selected
+positions; native inertial animation and platform-specific indicator/mask themes
+are outside this approximation.
+
+## Audited static image sources
+
+The optional `staticImageSources: Readonly<Record<string, string>>` maps an exact
+native image `src` to a trusted build-generated raster data URI. It enables
+packaged logos and source-code inline icons to render independently of the miniapp
+filesystem. Acceptable values are base64 PNG, JPEG, GIF, WebP, or AVIF and at most
+128 KiB per complete URI. SVG, malformed and oversized entries fall back to the
+normal filtered URL behavior. Each actual use counts toward recorder byte limits.
+
+The host must audit the build inputs and bound its generated mapping. Never
+populate it from runtime user photos, temporary files or downloaded image data.
+Only explicit own properties are used; dynamically supplied data URLs retain the
+existing payload removal. The SDK does not read platform files or fetch assets.
 
 ## Privacy and resource defaults
 

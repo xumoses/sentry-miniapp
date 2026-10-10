@@ -39,6 +39,8 @@
 
 > ⚠️ **真机可能是另一种形态。** 真机上微信常把逻辑层 JS 合并成单个 `app:///appservice.app.js`（用 Taro / uni-app 时几乎必然），分页 Source Map 解不出。**上传前先在真机触发一个错误、看清堆栈文件名，再决定传哪种 map**——详见 [跨端框架的两层 Source Map 串联](#跨端框架的两层-source-map-串联)。
 
+`miniappStackParser` 支持 V8 与 Safari 堆栈中的完整 URL（包含协议、端口、查询参数和编码路径），并保留帧顺序及运行时行列号；路径归一化由 `RewriteFrames` 单独处理。微信开发者工具的 `http://127.0.0.1:<port>/appservice/getsubpackagebundle_...js?...` 可能是工具拼接后的 bundle，不能直接替换为某个页面文件名并沿用原行列号。需使用对应 bundle 的 Source Map；若必须保留原始 URL，可关闭 `enableSourceMap` 的路径归一化并在宿主中按实际构建映射处理。
+
 **端到端流程：**
 
 ```

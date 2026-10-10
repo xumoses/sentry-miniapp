@@ -12,6 +12,7 @@
 import { uuid4, type Breadcrumb } from '@sentry/core';
 
 import { normalizeReplayRpx, TARO_REPLAY_BASE_STYLESHEET } from './replay-styles';
+import { boundReplayEvents } from './replay-buffer';
 
 export const TARO_DOM_REPLAY_POC_MARKER = 'TARO_DOM_REPLAY_POC';
 
@@ -40,7 +41,7 @@ interface TaroAttributeLike {
 }
 
 export interface TaroReplayScrollEventLike {
-  detail?: { scrollTop?: unknown; scrollLeft?: unknown };
+  detail?: { scrollTop?: unknown; scrollLeft?: unknown; value?: unknown };
 }
 
 export interface TaroReplayNodeLike {
@@ -151,6 +152,8 @@ export interface StartTaroDomReplayPocOptions {
   height?: number;
   /** Trusted, caller-built page CSS using Replay selectors; no stylesheet is read at runtime. */
   stylesheet?: string;
+  /** Audited build-time image sources; dynamic data URLs remain filtered. */
+  staticImageSources?: Readonly<Record<string, string>>;
   /** Masks every Taro text node by default. Set to false only for privacy-safe content. */
   maskAllText?: boolean;
   /** Masks ordinary inputs by default; password and explicitly marked inputs always stay masked. */
@@ -188,10 +191,16 @@ const TAG_MAP: Record<string, string> = {
   'scroll-view': 'div',
   swiper: 'div',
   'swiper-item': 'div',
+  'root-portal': 'div',
+  'picker-view': 'div',
+  'picker-view-column': 'div',
 };
 
 const SELF_CLOSING_TAGS = new Set(['img', 'input']);
 const SYNTHETIC_NODE_MAX_ID = 9;
+const MAX_STATIC_IMAGE_SOURCE_BYTES = 128 * 1024;
+const STATIC_IMAGE_DATA_URI =
+  /^data:image\/(?:png|jpeg|gif|webp|avif);base64,[A-Za-z0-9+/]+={0,2}$/;
 const URL_ATTRIBUTE_NAMES = new Set(['action', 'formaction', 'href', 'poster', 'src']);
 const INPUT_MASK_ATTRIBUTE_NAMES = new Set(['password', 'type', 'data-sentry-mask']);
 const SENSITIVE_ATTRIBUTE_NAME =
@@ -205,6 +214,66 @@ interface ScrollPosition {
 // A still-mounted page retains its native offset when the buffer promotes and
 // creates a new recorder. Weak keys release the offset with the virtual node.
 const scrollPositions = new WeakMap<TaroReplayNodeLike, ScrollPosition>();
+const pickerValues = new WeakMap<TaroReplayNodeLike, number[]>();
+
+function isRootPortal(node: TaroReplayNodeLike): boolean {
+  return normaliseNodeName(node) === 'root-portal';
+}
+
+function portalEnabled(node: TaroReplayNodeLike): boolean {
+  const value = rawAttributeValue(node, 'enable');
+  return isRootPortal(node) && value !== false && value !== 'false' && value !== 0;
+}
+
+function isPickerView(node: TaroReplayNodeLike): boolean {
+  return normaliseNodeName(node) === 'picker-view';
+}
+
+function pickerColumns(node: TaroReplayNodeLike): TaroReplayNodeLike[] {
+  return toArray(node.childNodes).filter(
+    (child) => normaliseNodeName(child) === 'picker-view-column',
+  );
+}
+
+function pickerRows(node: TaroReplayNodeLike): TaroReplayNodeLike[] {
+  return toArray(node.childNodes).filter((child) => child.nodeType === 1);
+}
+
+function normalisePickerValues(node: TaroReplayNodeLike, value: unknown): number[] {
+  const values = Array.isArray(value) ? value : String(value ?? '').split(',');
+  return pickerColumns(node).map((column, index) => {
+    const numeric = Number(values[index]);
+    const selected = Number.isFinite(numeric) ? Math.max(0, Math.floor(numeric)) : 0;
+    return Math.min(selected, Math.max(0, pickerRows(column).length - 1));
+  });
+}
+
+function getPickerValues(node: TaroReplayNodeLike): number[] {
+  return normalisePickerValues(
+    node,
+    pickerValues.get(node) ??
+      rawAttributeValue(node, 'value') ??
+      rawAttributeValue(node, 'defaultvalue'),
+  );
+}
+
+function hasNodeAncestor(
+  node: TaroReplayNodeLike,
+  predicate: (node: TaroReplayNodeLike) => boolean,
+): boolean {
+  for (
+    let current: TaroReplayNodeLike | null | undefined = node;
+    current;
+    current = current.parentNode
+  ) {
+    if (predicate(current)) return true;
+  }
+  return false;
+}
+
+function containsRootPortal(node: TaroReplayNodeLike): boolean {
+  return isRootPortal(node) || toArray(node.childNodes).some(containsRootPortal);
+}
 
 function isScrollView(node: TaroReplayNodeLike): boolean {
   const name = normaliseNodeName(node);
@@ -387,6 +456,7 @@ export function startTaroDomReplayPoc(
   const lastTextValues = new WeakMap<object, string>();
   const lastAttributeValues = new WeakMap<object, Map<string, string | number | true | null>>();
   const scrollListeners = new Map<TaroReplayNodeLike, (event: TaroReplayScrollEventLike) => void>();
+  const pickerListeners = new Map<TaroReplayNodeLike, (event: TaroReplayScrollEventLike) => void>();
   let lastEventTimestamp = startedAt - 1;
   let nextNodeId = SYNTHETIC_NODE_MAX_ID + 1;
   let mutationCount = 0;
@@ -464,6 +534,45 @@ export function startTaroDomReplayPoc(
         // An unsupported event surface must not affect page rendering.
       }
     }
+    if (
+      isPickerView(node) &&
+      node.addEventListener &&
+      node.removeEventListener &&
+      !pickerListeners.has(node)
+    ) {
+      const listener = (event: TaroReplayScrollEventLike): void => {
+        if (
+          stopped ||
+          pickerListeners.get(node) !== listener ||
+          !Array.isArray(event.detail?.value)
+        )
+          return;
+        const previous = getPickerValues(node);
+        const selected = normalisePickerValues(node, event.detail.value);
+        if (selected.every((value, index) => value === previous[index])) return;
+        pickerValues.set(node, selected);
+        addEvent({
+          type: RrwebEventType.IncrementalSnapshot,
+          timestamp: nextTimestamp(),
+          data: {
+            source: RrwebIncrementalSource.Mutation,
+            texts: [],
+            removes: [],
+            adds: [],
+            attributes: pickerColumns(node).map((column) => ({
+              id: idFor(column),
+              attributes: readAttributes(column),
+            })),
+          },
+        });
+      };
+      try {
+        node.addEventListener('change', listener);
+        pickerListeners.set(node, listener);
+      } catch {
+        // Hosts without native picker events still retain the initial selected rows.
+      }
+    }
     for (const child of toArray(node.childNodes)) attachScrollSubtree(child);
   }
 
@@ -477,7 +586,65 @@ export function startTaroDomReplayPoc(
       }
       scrollListeners.delete(node);
     }
+    const pickerListener = pickerListeners.get(node);
+    if (pickerListener) {
+      try {
+        node.removeEventListener?.('change', pickerListener);
+      } catch {
+        // Keep recorder teardown separate from application event handlers.
+      }
+      pickerListeners.delete(node);
+    }
     for (const child of toArray(node.childNodes)) detachScrollSubtree(child);
+  }
+
+  function replayAttributeValue(
+    node: TaroReplayNodeLike,
+    name: string,
+    value: unknown,
+    maskNodeInputValues: boolean,
+  ): string | number | true | null {
+    if (
+      normaliseNodeName(node) === 'image' &&
+      name.toLowerCase() === 'src' &&
+      typeof value === 'string'
+    ) {
+      const sources = options.staticImageSources;
+      const trusted =
+        sources && Object.prototype.hasOwnProperty.call(sources, value)
+          ? sources[value]
+          : undefined;
+      if (
+        typeof trusted === 'string' &&
+        trusted.length <= MAX_STATIC_IMAGE_SOURCE_BYTES &&
+        STATIC_IMAGE_DATA_URI.test(trusted)
+      )
+        return trusted;
+    }
+    return sanitizeAttributeValue(node, name, value, maskNodeInputValues);
+  }
+
+  function pickerPlaybackStyle(node: TaroReplayNodeLike, original: unknown): string {
+    const declarations = [typeof original === 'string' ? original : ''];
+    if (isPickerView(node)) {
+      const indicator = String(rawAttributeValue(node, 'indicatorstyle') ?? '');
+      const height = /(?:^|;)\s*height\s*:\s*([^;]+)/i.exec(indicator)?.[1] ?? '34px';
+      declarations.push(
+        `--taro-replay-picker-item-height:${normalizeReplayRpx(height, viewportWidth)}`,
+      );
+    } else if (
+      normaliseNodeName(node) === 'picker-view-column' &&
+      node.parentNode &&
+      isPickerView(node.parentNode)
+    ) {
+      const index = pickerColumns(node.parentNode).indexOf(node);
+      declarations.push(
+        `--taro-replay-picker-selected:${getPickerValues(node.parentNode)[index] ?? 0}`,
+      );
+    } else if (node.parentNode && normaliseNodeName(node.parentNode) === 'picker-view-column') {
+      declarations.push(`--taro-replay-picker-row:${pickerRows(node.parentNode).indexOf(node)}`);
+    }
+    return declarations.filter(Boolean).join(';');
   }
 
   function readAttributes(node: TaroReplayNodeLike): Record<string, string | number | true | null> {
@@ -489,12 +656,7 @@ export function startTaroDomReplayPoc(
 
     for (const attribute of toArray(node.attributes)) {
       if (!attribute || !attribute.name || /^on/i.test(attribute.name)) continue;
-      let value = sanitizeAttributeValue(
-        node,
-        attribute.name,
-        attribute.value,
-        maskNodeInputValues,
-      );
+      let value = replayAttributeValue(node, attribute.name, attribute.value, maskNodeInputValues);
       if (attribute.name === 'style' && typeof value === 'string') {
         value = normalizeReplayRpx(value, viewportWidth);
       }
@@ -507,12 +669,37 @@ export function startTaroDomReplayPoc(
       result['rr_scrollTop'] = position.y;
       result['rr_scrollLeft'] = position.x;
     }
+    if (
+      isPickerView(node) ||
+      normaliseNodeName(node) === 'picker-view-column' ||
+      normaliseNodeName(node.parentNode ?? node) === 'picker-view-column'
+    ) {
+      result['style'] = pickerPlaybackStyle(node, result['style']);
+      if (normaliseNodeName(node.parentNode ?? node) === 'picker-view-column')
+        result['data-taro-picker-row'] = true;
+    }
     lastAttributeValues.set(node, remembered);
 
     return result;
   }
 
-  function serializeNode(node: TaroReplayNodeLike): SerializedNode {
+  function serializeChildren(
+    node: TaroReplayNodeLike,
+    portals?: SerializedElementNode[],
+  ): SerializedNode[] {
+    const children: SerializedNode[] = [];
+    for (const child of toArray(node.childNodes)) {
+      const serialized = serializeNode(child, portals);
+      if (portals && portalEnabled(child)) portals.push(serialized as SerializedElementNode);
+      else children.push(serialized);
+    }
+    return children;
+  }
+
+  function serializeNode(
+    node: TaroReplayNodeLike,
+    portals?: SerializedElementNode[],
+  ): SerializedNode {
     const nodeName = normaliseNodeName(node);
     if (node.nodeType === 3 || nodeName === '#text' || nodeName === 'comment') {
       const comment = nodeName === 'comment';
@@ -538,7 +725,7 @@ export function startTaroDomReplayPoc(
       type: RrwebNodeType.Element,
       tagName,
       attributes,
-      childNodes: SELF_CLOSING_TAGS.has(tagName) ? [] : toArray(node.childNodes).map(serializeNode),
+      childNodes: SELF_CLOSING_TAGS.has(tagName) ? [] : serializeChildren(node, portals),
     };
   }
 
@@ -562,12 +749,14 @@ export function startTaroDomReplayPoc(
       attributes: {},
       childNodes: [style],
     };
+    const portals: SerializedElementNode[] = [];
+    const root = serializeNode(options.root, portals);
     const body: SerializedElementNode = {
       id: 4,
       type: RrwebNodeType.Element,
       tagName: 'body',
       attributes: {},
-      childNodes: [serializeNode(options.root)],
+      childNodes: [root, ...portals],
     };
     const html: SerializedElementNode = {
       id: 2,
@@ -584,6 +773,7 @@ export function startTaroDomReplayPoc(
   }
 
   function addEvent(event: TaroReplayPocEvent): boolean {
+    if (stopped) return false;
     const eventBytes = utf8ByteLength(JSON.stringify(event));
     if (options.rollingWindowMs !== undefined) {
       const meta = capture.events[0];
@@ -609,19 +799,29 @@ export function startTaroDomReplayPoc(
           return true;
         }
       }
+      const previousEvents = capture.events.slice();
+      const previousStats = { ...capture.stats };
       capture.events.push(event);
       capture.stats.approximateBytes += eventBytes;
-      const minimumTimestamp = event.timestamp - Math.max(0, options.rollingWindowMs);
-      while (
-        capture.events.length > 2 &&
-        (capture.events.length > maxEvents ||
-          capture.stats.approximateBytes > maxBytes ||
-          (capture.events[2]?.timestamp ?? event.timestamp) < minimumTimestamp)
-      ) {
-        const removed = capture.events.splice(2, 1)[0];
-        if (removed) {
-          capture.stats.approximateBytes -= utf8ByteLength(JSON.stringify(removed));
+      if (capture.events.some((candidate) => candidate.type === RrwebEventType.FullSnapshot)) {
+        const bounded = boundReplayEvents(capture.events, {
+          now: event.timestamp,
+          windowMs: options.rollingWindowMs,
+          maxEvents,
+          maxBytes,
+        });
+        if (!bounded.length) {
+          capture.events = previousEvents;
+          capture.stats = previousStats;
+          stop('limit');
+          return false;
         }
+        capture.events = bounded;
+        capture.startedAt = bounded[0]?.timestamp ?? capture.startedAt;
+        capture.stats.approximateBytes = bounded.reduce(
+          (total, candidate) => total + utf8ByteLength(JSON.stringify(candidate)),
+          0,
+        );
       }
       capture.stats.eventCount = capture.events.length;
       options.onEvent?.(event);
@@ -732,8 +932,16 @@ export function startTaroDomReplayPoc(
     const raw = node.getAttribute
       ? node.getAttribute(attributeName)
       : rawAttributeValue(node, attributeName);
+    if (
+      attributeName === 'style' &&
+      (isPickerView(node) ||
+        normaliseNodeName(node) === 'picker-view-column' ||
+        normaliseNodeName(node.parentNode ?? node) === 'picker-view-column')
+    ) {
+      return pickerPlaybackStyle(node, normalizeReplayRpx(String(raw ?? ''), viewportWidth));
+    }
     if (attributeName === 'style' && (raw === null || raw === undefined || raw === '')) return null;
-    const value = sanitizeAttributeValue(node, attributeName, raw, shouldMaskInputValues(node));
+    const value = replayAttributeValue(node, attributeName, raw, shouldMaskInputValues(node));
     return attributeName === 'style' && typeof value === 'string'
       ? normalizeReplayRpx(value, viewportWidth)
       : value;
@@ -741,6 +949,44 @@ export function startTaroDomReplayPoc(
 
   function handleMutations(records: TaroReplayMutationRecordLike[]): void {
     if (stopped) return;
+    const visualCheckpoint = records.some(
+      (record) =>
+        (record.type === 'attributes' &&
+          ((isRootPortal(record.target) && record.attributeName?.toLowerCase() === 'enable') ||
+            (isPickerView(record.target) &&
+              ['value', 'defaultvalue', 'indicatorstyle'].includes(
+                record.attributeName?.toLowerCase() ?? '',
+              )))) ||
+        (record.type === 'childList' &&
+          (hasNodeAncestor(record.target, isRootPortal) ||
+            hasNodeAncestor(record.target, isPickerView) ||
+            [...toArray(record.addedNodes), ...toArray(record.removedNodes)].some(
+              containsRootPortal,
+            ))),
+    );
+    if (visualCheckpoint) {
+      for (const record of records) {
+        mutationCount++;
+        if (record.type === 'childList') {
+          for (const node of toArray(record.removedNodes)) detachScrollSubtree(node);
+          for (const node of toArray(record.addedNodes)) attachScrollSubtree(node);
+        } else if (
+          record.type === 'attributes' &&
+          isPickerView(record.target) &&
+          ['value', 'defaultvalue'].includes(record.attributeName?.toLowerCase() ?? '')
+        ) {
+          pickerValues.delete(record.target);
+        }
+      }
+      addEvent({
+        type: RrwebEventType.FullSnapshot,
+        timestamp: nextTimestamp(),
+        data: { node: fullSnapshot(), initialOffset: { top: 0, left: 0 } },
+      });
+      if (!stopped) capture.stats.mutationCount = mutationCount;
+      capture.warnings = Array.from(warnings);
+      return;
+    }
     let needsStructuralCheckpoint = false;
     const texts: Array<{ id: number; value: string }> = [];
     const attributes: Array<{
@@ -812,7 +1058,6 @@ export function startTaroDomReplayPoc(
     }
 
     if (!texts.length && !attributes.length && !removes.length && !adds.length) return;
-    capture.stats.mutationCount = mutationCount;
     capture.warnings = Array.from(warnings);
     addEvent({
       type: RrwebEventType.IncrementalSnapshot,
@@ -825,7 +1070,8 @@ export function startTaroDomReplayPoc(
         adds,
       },
     });
-    if (needsStructuralCheckpoint) {
+    if (!stopped) capture.stats.mutationCount = mutationCount;
+    if (needsStructuralCheckpoint && !stopped) {
       addEvent({
         type: RrwebEventType.FullSnapshot,
         timestamp: nextTimestamp(),
@@ -842,6 +1088,14 @@ export function startTaroDomReplayPoc(
     stopped = true;
     if (resources.timer) clearTimeout(resources.timer);
     resources.observer?.disconnect();
+    for (const [node, listener] of pickerListeners) {
+      try {
+        node.removeEventListener?.('change', listener);
+      } catch {
+        /* Safe platform fallback. */
+      }
+    }
+    pickerListeners.clear();
     for (const [node, listener] of scrollListeners) {
       try {
         node.removeEventListener?.('scroll', listener);

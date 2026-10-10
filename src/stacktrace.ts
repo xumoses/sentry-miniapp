@@ -9,7 +9,8 @@ import type { StackFrame } from '@sentry/core';
  *   at functionName (app-service.js:123:45)
  *   at Object.handleTap (pages/index/index.js:42:13)
  */
-const V8_STACK_LINE_REGEX = /^\s*at\s+(?:(.+?)\s+\()?([^\s():]+):(\d+):(\d+)\)?$/;
+// Keep schemes, ports and query strings; only the final line/column suffix is removed.
+const V8_STACK_LINE_REGEX = /^\s*at\s+(?:(.+?)\s+\()?([^\s()]+):(\d+):(\d+)\)?$/;
 
 /**
  * 匹配 Safari/JavaScriptCore 风格的堆栈帧（iOS WebView 环境）
@@ -17,7 +18,8 @@ const V8_STACK_LINE_REGEX = /^\s*at\s+(?:(.+?)\s+\()?([^\s():]+):(\d+):(\d+)\)?$
  *   functionName@filename:line:col
  *   @filename:line:col
  */
-const SAFARI_STACK_LINE_REGEX = /^\s*(?:([^@]*)@)?([^\s@:]+(?:\.[a-z]+)+):(\d+)(?::(\d+))?\s*$/;
+// The lazy location group preserves an optional column instead of consuming the line number.
+const SAFARI_STACK_LINE_REGEX = /^\s*(?:([^@]*)@)?([^\s@]+?):(\d+)(?::(\d+))?\s*$/;
 
 /**
  * 匹配简化格式的堆栈帧（部分平台的简化输出）
@@ -66,6 +68,15 @@ function safariStackLineParser(line: string): StackFrame | undefined {
   }
 
   const [, functionName, filename, linenoStr, colnoStr] = match;
+  // Bare locations must still look like a URL or file, rather than an error message (Error:123).
+  if (
+    !filename ||
+    (functionName === undefined &&
+      !/^[a-z][a-z\d+.-]*:\/\//i.test(filename) &&
+      !/\.[a-z\d]+(?:[?#].*)?$/i.test(filename))
+  ) {
+    return undefined;
+  }
   const frame: StackFrame = {
     filename: filename || '<anonymous>',
     function: functionName || UNKNOWN_FUNCTION,
