@@ -143,16 +143,34 @@ are outside this approximation.
 ## Audited static image sources
 
 The optional `staticImageSources: Readonly<Record<string, string>>` maps an exact
-native image `src` to a trusted build-generated raster data URI. It enables
+native image `src` to a trusted build-generated image data URI. It enables
 packaged logos and source-code inline icons to render independently of the miniapp
-filesystem. Acceptable values are base64 PNG, JPEG, GIF, WebP, or AVIF and at most
-128 KiB per complete URI. SVG, malformed and oversized entries fall back to the
-normal filtered URL behavior. Each actual use counts toward recorder byte limits.
+filesystem. Acceptable raster values are base64 PNG, JPEG, GIF, WebP, or AVIF.
+Static SVG values may use either of these forms (the UTF-8 charset is optional):
 
-The host must audit the build inputs and bound its generated mapping. Never
-populate it from runtime user photos, temporary files or downloaded image data.
-Only explicit own properties are used; dynamically supplied data URLs retain the
-existing payload removal. The SDK does not read platform files or fetch assets.
+- `data:image/svg+xml[;charset=utf-8];base64,<standard padded base64>`
+- `data:image/svg+xml[;charset=utf-8],<URI-encoded UTF-8 SVG>`
+
+Both the FullSnapshot and later `src` mutations retain the complete trusted URI,
+including its original encoding. Percent encoding must decode as valid UTF-8;
+raw XML, malformed encodings, unsupported MIME types and entries above 128 KiB
+per complete URI fall back to the normal filtered URL behavior. The original
+native `src` remains the exact lookup key, including a Taro inline data URI when
+applicable. A host may map that original key to canonical base64 from the same
+reviewed source asset. Each actual use counts toward recorder byte limits; the
+host must also bound the total mapping for each route.
+
+This is an explicit code/asset trust boundary, not an SVG content sanitizer. The
+SDK validates URI encoding and size, without parsing XML or removing scripts,
+event handlers, external references or `foreignObject` contents. The host must
+audit its build inputs and only include static images safe to display in Replay.
+Never populate the map from runtime user photos, generated user content, temporary
+files or downloaded image data. Only explicit own properties are used, only for
+Taro Image `src`; unlisted or changed runtime SVG/data URLs retain the existing
+payload removal, including mixed-case `Data:` / `DATA:` schemes, leading C0
+control characters/spaces, and ASCII tabs or newlines within the scheme. That
+browser-compatible detection does not normalize whitelist keys or rewrite
+non-data URL content. The SDK does not read platform files or fetch assets.
 
 ## Privacy and resource defaults
 

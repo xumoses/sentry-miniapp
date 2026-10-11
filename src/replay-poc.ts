@@ -201,6 +201,27 @@ const SYNTHETIC_NODE_MAX_ID = 9;
 const MAX_STATIC_IMAGE_SOURCE_BYTES = 128 * 1024;
 const STATIC_IMAGE_DATA_URI =
   /^data:image\/(?:png|jpeg|gif|webp|avif);base64,[A-Za-z0-9+/]+={0,2}$/;
+const STATIC_SVG_BASE64_DATA_URI =
+  /^data:image\/svg\+xml(?:;charset=utf-8)?;base64,([A-Za-z0-9+/]+={0,2})$/;
+
+const STATIC_SVG_PERCENT_DATA_URI =
+  /^data:image\/svg\+xml(?:;charset=utf-8)?,([A-Za-z0-9\-._~!$&'()*+,;=:@/?%]+)$/;
+
+// This validates encoding only. The caller must audit the static image contents.
+function isStaticImageDataUri(value: string): boolean {
+  if (STATIC_IMAGE_DATA_URI.test(value)) return true;
+  const base64Svg = STATIC_SVG_BASE64_DATA_URI.exec(value);
+  if (base64Svg) return base64Svg[1]!.length % 4 === 0;
+  const svg = STATIC_SVG_PERCENT_DATA_URI.exec(value);
+  if (!svg) return false;
+  try {
+    decodeURIComponent(svg[1]!);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const URL_ATTRIBUTE_NAMES = new Set(['action', 'formaction', 'href', 'poster', 'src']);
 const INPUT_MASK_ATTRIBUTE_NAMES = new Set(['password', 'type', 'data-sentry-mask']);
 const SENSITIVE_ATTRIBUTE_NAME =
@@ -303,8 +324,13 @@ function getScrollPosition(node: TaroReplayNodeLike): ScrollPosition {
 }
 
 function sanitizeUrl(value: string): string {
-  if (value.startsWith('data:')) {
-    const mimeType = value.match(/^data:([^;,]+)/)?.[1] || 'text/plain';
+  // Browser URL parsing skips leading C0/space and removes ASCII tabs/newlines.
+  // Use that copy only to detect data URLs; exact image keys and other URLs stay unchanged.
+  let start = 0;
+  while (start < value.length && value.charCodeAt(start) <= 0x20) start++;
+  const dataUrlCandidate = value.slice(start).replace(/[\t\n\r]/g, '');
+  if (/^data:/i.test(dataUrlCandidate)) {
+    const mimeType = dataUrlCandidate.match(/^data:([^;,]+)/i)?.[1] || 'text/plain';
     return `data:${mimeType}`;
   }
 
@@ -619,7 +645,7 @@ export function startTaroDomReplayPoc(
       if (
         typeof trusted === 'string' &&
         trusted.length <= MAX_STATIC_IMAGE_SOURCE_BYTES &&
-        STATIC_IMAGE_DATA_URI.test(trusted)
+        isStaticImageDataUri(trusted)
       )
         return trusted;
     }

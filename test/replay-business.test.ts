@@ -160,10 +160,204 @@ describe('Taro business component replay semantics', () => {
     controller.stop();
   });
 
-  it('rejects SVG, oversized and malformed trusted image entries without weakening URL privacy', () => {
+  it('preserves explicitly audited base64 SVGs in snapshots and source mutations', () => {
+    const observer = harness();
+    const svg = 'data:image/svg+xml;base64,PHN2Zy8+';
+    const charsetSvg = 'data:image/svg+xml;charset=utf-8;base64,PHN2Zy8+';
+    const image = element('image', { 'data-fixture': 'svg', src: '/assets/icon.svg' });
+    const controller = startTaroDomReplayPoc({
+      root: element('root', {}, [image]),
+      MutationObserver: observer.MutationObserver,
+      staticImageSources: { '/assets/icon.svg': svg, [charsetSvg]: charsetSvg },
+    });
+    expect(marked(snapshot(controller), 'svg')?.attributes?.['src']).toBe(svg);
+    image.props['src'] = charsetSvg;
+    observer.emit([{ type: 'attributes', target: image, attributeName: 'src' }]);
+    expect(controller.getCapture().events.at(-1)?.data['attributes']).toEqual([
+      { id: marked(snapshot(controller), 'svg')?.id, attributes: { src: charsetSvg } },
+    ]);
+    controller.stop();
+  });
+
+  it('preserves audited percent-encoded SVGs with and without a UTF-8 charset', () => {
+    const observer = harness();
+    const payload = encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg"><path fill="#fff" d="M0 0h1v1z"/></svg>');
+    const svg = `data:image/svg+xml,${payload}`;
+    const charsetSvg = `data:image/svg+xml;charset=utf-8,${payload}`;
+    const image = element('image', { 'data-fixture': 'svg', src: svg });
+    const controller = startTaroDomReplayPoc({
+      root: element('root', {}, [image]),
+      MutationObserver: observer.MutationObserver,
+      staticImageSources: { [svg]: svg, '/assets/icon.svg': charsetSvg },
+    });
+    const initial = marked(snapshot(controller), 'svg');
+    image.props['src'] = '/assets/icon.svg';
+    observer.emit([{ type: 'attributes', target: image, attributeName: 'src' }]);
+    const mutation = controller.getCapture().events.at(-1)?.data['attributes'];
+    controller.stop();
+    expect(initial?.attributes?.['src']).toBe(svg);
+    expect(mutation).toEqual([{ id: initial?.id, attributes: { src: charsetSvg } }]);
+  });
+
+  it('keeps unlisted runtime SVG payloads private across snapshots and mutations', () => {
+    const observer = harness();
+    const canary = 'synthetic-private-svg-4471';
+    const privateXml = `<svg xmlns="http://www.w3.org/2000/svg"><text>${canary}</text></svg>`;
+    const runtimeBase64 = `data:image/svg+xml;base64,${Buffer.from(privateXml).toString('base64')}`;
+    const runtimePercent = `data:image/svg+xml,${encodeURIComponent(privateXml)}`;
+    const trusted = 'data:image/svg+xml;base64,PHN2Zy8+';
+    const image = element('image', { 'data-fixture': 'image', src: runtimeBase64 });
+    const view = element('view', { 'data-fixture': 'view', src: trusted });
+    const controller = startTaroDomReplayPoc({
+      root: element('root', {}, [image, view]),
+      MutationObserver: observer.MutationObserver,
+      maskAllText: false,
+      maskInputValues: false,
+      staticImageSources: { '/assets/icon.svg': trusted, [trusted]: trusted },
+    });
+    const initial = snapshot(controller);
+    image.props['src'] = '/assets/icon.svg';
+    observer.emit([{ type: 'attributes', target: image, attributeName: 'src' }]);
+    image.props['src'] = runtimePercent;
+    observer.emit([{ type: 'attributes', target: image, attributeName: 'src' }]);
+    const mutation = controller.getCapture().events.at(-1)?.data['attributes'];
+    image.props['src'] = `${trusted}#${canary}`;
+    observer.emit([{ type: 'attributes', target: image, attributeName: 'src' }]);
+    const captured = JSON.stringify(controller.getCapture());
+    controller.stop();
+    expect(marked(initial, 'image')?.attributes?.['src']).toBe('data:image/svg+xml');
+    expect(marked(initial, 'view')?.attributes?.['src']).toBe('data:image/svg+xml');
+    expect(mutation).toEqual([
+      { id: marked(initial, 'image')?.id, attributes: { src: 'data:image/svg+xml' } },
+    ]);
+    expect(captured.includes(canary)).toBe(false);
+    expect(captured.includes(runtimeBase64)).toBe(false);
+    expect(captured.includes(runtimePercent)).toBe(false);
+  });
+
+  it.each([
+    ['mixed-case', 'Data:'],
+    ['uppercase', 'DATA:'],
+    ['leading-space', ' data:'],
+    ['leading-tab', '\tdata:'],
+    ['leading-newline', '\ndata:'],
+    ['leading-null', '\u0000data:'],
+    ['leading-C0', '\u001fdata:'],
+    ['scheme-tab', 'da\tta:'],
+    ['scheme-newline', 'da\nta:'],
+    ['scheme-carriage-return', 'da\rta:'],
+  ])(
+    'filters unlisted SVG payloads accepted as browser data URLs: %s',
+    (_name, scheme) => {
+      const observer = harness();
+      const canary = 'synthetic-private-mixed-case-svg-4472';
+      const xml = `<svg><text>${canary}</text></svg>`;
+      const percent = `${scheme}image/svg+xml,${encodeURIComponent(xml)}`;
+      const base64 = `${scheme}image/svg+xml;base64,${Buffer.from(xml).toString('base64')}`;
+      expect(new URL(percent).protocol).toBe('data:');
+      expect(new URL(base64).protocol).toBe('data:');
+      const trusted = 'data:image/svg+xml;base64,PHN2Zy8+';
+      const dynamic = element('image', { 'data-fixture': 'dynamic', src: percent });
+      const mutable = element('image', { 'data-fixture': 'mutable', src: '/assets/icon.svg' });
+      const controller = startTaroDomReplayPoc({
+        root: element('root', {}, [dynamic, mutable]),
+        MutationObserver: observer.MutationObserver,
+        staticImageSources: { '/assets/icon.svg': trusted },
+      });
+      const initial = snapshot(controller);
+      mutable.props['src'] = base64;
+      observer.emit([{ type: 'attributes', target: mutable, attributeName: 'src' }]);
+      const mutation = controller.getCapture().events.at(-1)?.data['attributes'];
+      const captured = JSON.stringify(controller.getCapture());
+      controller.stop();
+      expect(marked(initial, 'dynamic')?.attributes?.['src']).toBe('data:image/svg+xml');
+      expect(mutation).toEqual([
+        { id: marked(initial, 'mutable')?.id, attributes: { src: 'data:image/svg+xml' } },
+      ]);
+      expect(captured.includes(canary)).toBe(false);
+      expect(captured.includes(percent)).toBe(false);
+      expect(captured.includes(base64)).toBe(false);
+    },
+  );
+
+  it('keeps whitelist keys exact and leaves non-data URL content unchanged', () => {
+    const observer = harness();
+    const trusted = 'data:image/svg+xml;base64,PHN2Zy8+';
+    const ordinary = ' \thttps://example.test/static/icon\n.svg';
+    const controller = startTaroDomReplayPoc({
+      root: element('root', {}, [
+        element('image', { 'data-fixture': 'exact', src: trusted }),
+        element('image', { 'data-fixture': 'variant', src: `\t${trusted}` }),
+        element('image', { 'data-fixture': 'ordinary', src: ordinary }),
+      ]),
+      MutationObserver: observer.MutationObserver,
+      staticImageSources: { [trusted]: trusted },
+    });
+    const initial = snapshot(controller);
+    controller.stop();
+    expect(marked(initial, 'exact')?.attributes?.['src']).toBe(trusted);
+    expect(marked(initial, 'variant')?.attributes?.['src']).toBe('data:image/svg+xml');
+    expect(marked(initial, 'ordinary')?.attributes?.['src']).toBe(ordinary);
+  });
+
+  it.each([
+    ['invalid-percent', 'data:image/svg+xml,%3Csvg%ZZ'],
+    ['invalid-utf8', 'data:image/svg+xml,%FF'],
+    ['raw-xml', 'data:image/svg+xml,<svg/>'],
+    ['empty-base64', 'data:image/svg+xml;base64,'],
+    ['invalid-base64-padding', 'data:image/svg+xml;base64,PHN2Zy8+==='],
+    ['incomplete-base64', 'data:image/svg+xml;base64,PHN2Zz4'],
+    ['unsupported-mime', 'data:text/html;base64,PHN2Zy8+'],
+    ['oversized-base64', 'data:image/svg+xml;base64,' + 'A'.repeat(128 * 1024)],
+    ['oversized-percent', 'data:image/svg+xml,' + '%20'.repeat(44 * 1024)],
+  ])('filters invalid or oversized trusted SVG encoding: %s', (_name, value) => {
+    const observer = harness();
+    const image = element('image', { 'data-fixture': 'image', src: '/assets/icon.svg' });
+    const controller = startTaroDomReplayPoc({
+      root: element('root', {}, [image]),
+      MutationObserver: observer.MutationObserver,
+      staticImageSources: { '/assets/icon.svg': value },
+    });
+    const recorded = marked(snapshot(controller), 'image')?.attributes?.['src'];
+    controller.stop();
+    expect(recorded).toBe('/assets/icon.svg');
+  });
+
+  it('counts SVGs used by the DOM rather than the source map, including repeated sources', () => {
+    const xml = `<svg xmlns="http://www.w3.org/2000/svg"><!--${'x'.repeat(70000)}--></svg>`;
+    const svg = `data:image/svg+xml;base64,${Buffer.from(xml).toString('base64')}`;
+    const staticImageSources = Object.fromEntries(
+      Array.from({ length: 20 }, (_, index) => [`/unused/asset-${index}.svg`, svg]),
+    );
+    staticImageSources['/assets/icon.svg'] = svg;
+    expect(Buffer.byteLength(JSON.stringify(staticImageSources))).toBeGreaterThan(512 * 1024);
+    const record = (count: number) => {
+      const observer = harness();
+      const controller = startTaroDomReplayPoc({
+        root: element('root', {}, Array.from({ length: count }, () =>
+          element('image', { src: '/assets/icon.svg' }),
+        )),
+        MutationObserver: observer.MutationObserver,
+        staticImageSources,
+        maxBytes: 512 * 1024,
+      });
+      return controller.stop();
+    };
+    const sparse = record(1);
+    expect(sparse.events.map((event) => event.type)).toEqual([4, 2]);
+    expect(JSON.stringify(sparse.events).includes('/unused/asset-')).toBe(false);
+    const repeated = record(2);
+    expect(JSON.stringify(repeated.events).split(svg)).toHaveLength(3);
+    const oversized = record(6);
+    expect(oversized.stopReason).toBe('limit');
+    expect(oversized.events.map((event) => event.type)).toEqual([4]);
+    expect(oversized.stats.approximateBytes).toBeLessThanOrEqual(512 * 1024);
+  });
+
+  it('rejects oversized and malformed trusted image entries without weakening URL privacy', () => {
     const observer = harness();
     const sources = {
-      '/svg': 'data:image/svg+xml;base64,PHN2Zz4=',
+      '/svg': 'data:image/svg+xml;base64,invalid?',
       '/large': 'data:image/png;base64,' + 'a'.repeat(128 * 1024),
       '/invalid': 'data:image/png;base64,not base64',
       '/prototype': imageData,
