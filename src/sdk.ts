@@ -5,6 +5,8 @@ import {
   setContext,
   withScope,
   eventFiltersIntegration,
+  getIntegrationsToSetup,
+  spanStreamingIntegration,
 } from '@sentry/core';
 import type { Integration } from '@sentry/core';
 import { miniappStackParser } from './stacktrace';
@@ -22,6 +24,7 @@ import {
   RewriteFrames,
   NetworkBreadcrumbs,
   PageBreadcrumbs,
+  PageTracing,
   ConsoleBreadcrumbs,
   SessionIntegration,
   NetworkStatusIntegration,
@@ -74,12 +77,17 @@ export function init(options: MiniappOptions = {}): MiniappClient | undefined {
     return undefined;
   }
 
-  const integrations = [...(options.integrations || getDefaultIntegrations())];
+  const previous = getClient();
+  if (previous instanceof MiniappClient) {
+    // Cleanup is synchronous; the old transport may finish its already-started flush.
+    void Promise.resolve(previous.close(0)).catch(() => {});
+  }
+  const integrations = getDefaultIntegrations();
 
   const opts = {
     ...options,
     integrations,
-    stackParser: miniappStackParser,
+    stackParser: options.stackParser || miniappStackParser,
     transport: options.transport,
   };
 
@@ -113,6 +121,14 @@ export function init(options: MiniappOptions = {}): MiniappClient | undefined {
     );
   }
 
+  if (
+    opts.enablePageTracing !== false &&
+    (opts.tracesSampleRate !== undefined || opts.tracesSampler)
+  ) {
+    if (!opts.integrations.some((integration) => integration.name === PageTracing.id))
+      opts.integrations.push(new PageTracing());
+  }
+
   // 网络状态实时监控（默认启用）
   if (opts.enableNetworkStatusMonitoring !== false) {
     opts.integrations.push(new NetworkStatusIntegration());
@@ -128,7 +144,9 @@ export function init(options: MiniappOptions = {}): MiniappClient | undefined {
   // 若用户已通过 integrations 自行传入同名集成，则不再自动追加，避免默认实例覆盖用户配置。
   const minigame = isMinigame();
   const hasIntegration = (id: string): boolean =>
-    opts.integrations.some((integration) => integration && integration.name === id);
+    opts.integrations.some((integration) => integration && integration.name === id) ||
+    (Array.isArray(options.integrations) &&
+      options.integrations.some((integration) => integration.name === id));
 
   // 入站过滤：让 allowUrls / denyUrls / ignoreErrors 真正生效（此前是声明了却无人消费的死选项）。
   // 仅在用户未自行传入同名集成时追加；按 exactOptionalPropertyTypes 只填已定义的键。
@@ -157,6 +175,15 @@ export function init(options: MiniappOptions = {}): MiniappClient | undefined {
     // 细调通过 minigameFrameRateOptions 传入（见 MiniappOptions）。
     opts.integrations.push(new MinigameFrameRateIntegration(opts.minigameFrameRateOptions));
   }
+
+  if (opts.traceLifecycle === 'stream') opts.integrations.push(spanStreamingIntegration());
+
+  // Resolve the complete platform defaults together, so false and callbacks work as in core.
+  opts.integrations = getIntegrationsToSetup({
+    ...options,
+    defaultIntegrations:
+      options.defaultIntegrations === undefined ? opts.integrations : options.defaultIntegrations,
+  });
 
   // 平台标记。device / os / app context 由 MiniappClient._prepareEvent 在每个事件上统一写入
   // （唯一权威），此处不再重复设置，避免字段不一致与覆盖歧义（见架构 review P2-b）。
@@ -213,6 +240,11 @@ export function wrap<T extends (...args: any[]) => any>(fn: T): T {
  */
 export function setConsent(granted: boolean): void {
   setConsentGranted(granted);
+  const client = getClient<MiniappClient>();
+  if (client?.setConsent) {
+    client.setConsent(granted);
+    return;
+  }
   if (granted) {
     // 不传 timeout → 触发 core offline transport 立即排空缓冲队列（见 makeOfflineTransport.flush，
     // 内部 retryDelay 复位 + flushIn(MIN_DELAY)）。fire-and-forget：排空走定时器，无需 await。
@@ -222,7 +254,7 @@ export function setConsent(granted: boolean): void {
 
 /** 读取当前同意状态（未开启 requireConsent 时恒为 true）。 */
 export function getConsent(): boolean {
-  return isConsentGranted();
+  return getClient<MiniappClient>()?.getConsent?.() ?? isConsentGranted();
 }
 
 /**
@@ -232,10 +264,13 @@ export function getConsent(): boolean {
  * @param params Feedback parameters
  * @returns Event ID
  */
-export function captureFeedback(params: SendFeedbackParams): string {
+export function captureFeedback(
+  params: SendFeedbackParams,
+  hint?: import('@sentry/core').EventHint & { includeReplay?: boolean },
+): string {
   const client = getCurrentScope().getClient() as MiniappClient | undefined;
   if (client) {
-    return client.captureFeedback(params);
+    return client.captureFeedback(params, hint);
   } else {
     console.warn('[sentry-miniapp] No client available for captureFeedback');
     return '';

@@ -88,7 +88,7 @@ describe('TryCatch（真 @sentry/core 集成）', () => {
     expect(val.mechanism?.type).toBe('instrument');
     expect(val.mechanism?.handled).toBe(true);
     expect((errEvent.exception as any).mechanism).toBeUndefined(); // 不再误挂容器级
-    expect(Array.isArray(errEvent.extra?.arguments)).toBe(true);
+    expect(errEvent.extra?.arguments).toBeUndefined();
   });
 
   it('Error.cause 链存在时，instrument mechanism 标在原始抛错而非 cause', async () => {
@@ -178,7 +178,7 @@ describe('TryCatch（真 @sentry/core 集成）', () => {
     );
     expect(ev).toBeDefined();
     // 不被上一次 wrap 的 mechanism / arguments 污染
-    expect(ev.exception.values[0].mechanism).toBeUndefined();
+    expect(ev.exception.values[0].mechanism).toEqual({ handled: true, type: 'generic' });
     expect(ev.extra?.arguments).toBeUndefined();
   });
 });

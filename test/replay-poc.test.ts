@@ -154,7 +154,11 @@ describe('Taro DOM Replay POC', () => {
     const scroll = scrollHarness();
     const applicationListener = jest.fn();
     scroll.listeners.add(applicationListener);
-    const controller = startTaroDomReplayPoc({ root, MutationObserver: observer.MutationObserver });
+    const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
+      root,
+      MutationObserver: observer.MutationObserver,
+    });
     const wrapper = element('view', 'wrapper', {}, [scroll.node]);
     root.childNodes?.push(wrapper);
     wrapper.parentNode = root;
@@ -178,6 +182,7 @@ describe('Taro DOM Replay POC', () => {
     const observer = observerHarness();
     const scroll = scrollHarness();
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root: scroll.node,
       MutationObserver: observer.MutationObserver,
       maxEvents: 3,
@@ -203,7 +208,11 @@ describe('Taro DOM Replay POC', () => {
         removeEventListener: jest.fn(),
       }),
     ]);
-    const controller = startTaroDomReplayPoc({ root, MutationObserver: observer.MutationObserver });
+    const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
+      root,
+      MutationObserver: observer.MutationObserver,
+    });
     expect(controller.getCapture().stopReason).toBeNull();
     expect(controller.stop().stopReason).toBe('manual');
     expect(observer.current()?.disconnect).toHaveBeenCalledTimes(1);
@@ -235,6 +244,7 @@ describe('Taro DOM Replay POC', () => {
       ),
     });
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root: element('view', 'root', {}, [scroll]),
       MutationObserver: observer.MutationObserver,
     });
@@ -259,6 +269,7 @@ describe('Taro DOM Replay POC', () => {
   it('stores controlled scroll offsets in the FullSnapshot for playback restoration', () => {
     const observer = observerHarness();
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root: element('scroll-view', 'scroll', { scrollY: true, scrollTop: 350, scrollLeft: 12 }),
       MutationObserver: observer.MutationObserver,
     });
@@ -330,6 +341,7 @@ describe('Taro DOM Replay POC', () => {
     const observer = observerHarness();
     const input = element('input', 'input', {}, [], 'padding:8px;border:1px solid #ccc');
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root: input,
       MutationObserver: observer.MutationObserver,
     });
@@ -365,7 +377,11 @@ describe('Taro DOM Replay POC', () => {
   it('preserves native content-box views so status-bar padding adds to the navigation height', () => {
     const observer = observerHarness();
     const root = element('view', 'navigation', {}, [], 'height:44px;padding-top:47px');
-    const controller = startTaroDomReplayPoc({ root, MutationObserver: observer.MutationObserver });
+    const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
+      root,
+      MutationObserver: observer.MutationObserver,
+    });
     const snapshot = fullSnapshotNode(controller.getCapture().events);
     controller.stop();
     const css = findNode(snapshot, (node) => node.tagName === 'style')?.childNodes?.[0]
@@ -430,6 +446,7 @@ describe('Taro DOM Replay POC', () => {
     const observer = observerHarness();
     const root = element('view', 'root', {}, [], 'padding:20rpx;width:750rpx');
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root,
       MutationObserver: observer.MutationObserver,
       width: 390,
@@ -461,6 +478,7 @@ describe('Taro DOM Replay POC', () => {
     const observer = observerHarness();
     const root = element('view', 'root', { className: 'compiled-header' });
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root,
       MutationObserver: observer.MutationObserver,
     });
@@ -481,6 +499,7 @@ describe('Taro DOM Replay POC', () => {
   it('uses the default viewport for rpx and leaves CSS strings and URLs intact', () => {
     const observer = observerHarness();
     const options = {
+      blockAllMedia: false,
       root: element('view', 'root', {}, [], 'padding:20rpx;background:url("/20rpx.png")'),
       MutationObserver: observer.MutationObserver,
       stylesheet:
@@ -507,6 +526,7 @@ describe('Taro DOM Replay POC', () => {
     const observer = observerHarness();
     expect(() =>
       startTaroDomReplayPoc({
+        blockAllMedia: false,
         root: null as unknown as TaroReplayNodeLike,
         MutationObserver: observer.MutationObserver,
       }),
@@ -518,6 +538,7 @@ describe('Taro DOM Replay POC', () => {
     const text = textNode('zero', 'text-1');
     const root = element('view', 'root-1', {}, [text]);
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root,
       MutationObserver: observer.MutationObserver,
       now: () => 1_000,
@@ -554,6 +575,7 @@ describe('Taro DOM Replay POC', () => {
   it('records Sentry breadcrumbs and network summaries as Replay custom events', () => {
     const observer = observerHarness();
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root: element('view', 'root-1'),
       MutationObserver: observer.MutationObserver,
       now: () => 4_000,
@@ -619,6 +641,7 @@ describe('Taro DOM Replay POC', () => {
     const observer = observerHarness();
     const input = element('input', 'input-1', { value: '123' });
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root: element('view', 'root-1', {}, [input]),
       MutationObserver: observer.MutationObserver,
       now: () => 4_000,
@@ -630,7 +653,7 @@ describe('Taro DOM Replay POC', () => {
       timestamp: 4.1,
       category: 'xhr',
       data: {
-        url: 'http://eqd-dev.example.test/upgrade/service_status.json',
+        url: 'http://api.example.test/upgrade/service_status.json',
         method: 'GET',
         status_code: 200,
         duration: 101,
@@ -652,11 +675,12 @@ describe('Taro DOM Replay POC', () => {
   it('includes caller-provided Sentry metadata in the capture', () => {
     const observer = observerHarness();
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root: element('view', 'root-1'),
       MutationObserver: observer.MutationObserver,
       metadata: {
         environment: 'develop',
-        release: 'derivative-manager-test',
+        release: 'host-app-test',
         sdk: { name: 'sentry.javascript.miniapp', version: '1.13.1' },
         user: { id: 'replay-poc-user' },
         tags: { framework: 'taro', 'miniapp.platform': 'wechat' },
@@ -667,7 +691,7 @@ describe('Taro DOM Replay POC', () => {
 
     expect(controller.getCapture().metadata).toEqual({
       environment: 'develop',
-      release: 'derivative-manager-test',
+      release: 'host-app-test',
       sdk: { name: 'sentry.javascript.miniapp', version: '1.13.1' },
       user: { id: 'replay-poc-user' },
       tags: { framework: 'taro', 'miniapp.platform': 'wechat' },
@@ -681,6 +705,7 @@ describe('Taro DOM Replay POC', () => {
     const input = element('input', 'input-1', { value: 'secret' });
     const root = element('view', 'root-1', {}, [input], 'color:red');
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root,
       MutationObserver: observer.MutationObserver,
       now: () => 2_000,
@@ -726,6 +751,7 @@ describe('Taro DOM Replay POC', () => {
     const observer = observerHarness();
     const input = element('input', 'password-input', { ...props, value: 'test-secret' });
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root: input,
       MutationObserver: observer.MutationObserver,
       maskAllText: false,
@@ -758,6 +784,7 @@ describe('Taro DOM Replay POC', () => {
     });
     const root = element('view', 'visible-root', {}, [text, input]);
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root,
       MutationObserver: observer.MutationObserver,
       maskAllText: false,
@@ -796,6 +823,7 @@ describe('Taro DOM Replay POC', () => {
       [attribute.name]: attribute.revealed,
     });
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root: input,
       MutationObserver: observer.MutationObserver,
       maskAllText: false,
@@ -818,7 +846,12 @@ describe('Taro DOM Replay POC', () => {
       { type: 'attributes', target: input, attributeName: attribute.name },
       { type: 'attributes', target: input, attributeName: 'value' },
     ]);
-    const changed = mutationData(controller.getCapture().events[3] as TaroReplayPocEvent);
+    const changed = mutationData(
+      controller
+        .getCapture()
+        .events.filter((event) => event.data['source'] === 0)
+        .at(-1) as TaroReplayPocEvent,
+    );
     expect(changed.attributes).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -834,6 +867,7 @@ describe('Taro DOM Replay POC', () => {
     const observer = observerHarness();
     const root = element('view', 'root-1');
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root,
       MutationObserver: observer.MutationObserver,
       maskAllText: false,
@@ -862,6 +896,7 @@ describe('Taro DOM Replay POC', () => {
     });
     const root = element('view', 'root-1', {}, [textNode('public text', 'text-1'), image]);
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root,
       MutationObserver: observer.MutationObserver,
       href: 'https://miniapp.local/pages/home?openid=secret#state',
@@ -894,6 +929,7 @@ describe('Taro DOM Replay POC', () => {
   it('accounts for replay event limits in UTF-8 bytes', () => {
     const observer = observerHarness();
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root: element('view', 'root-1', {}, [textNode('你好🚀', 'text-1')]),
       MutationObserver: observer.MutationObserver,
       maskAllText: false,
@@ -916,6 +952,7 @@ describe('Taro DOM Replay POC', () => {
     });
     const imageWithoutMime = element('image', 'image-default', { src: 'data:,private' });
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root: element('view', 'root-1', {}, [
         textNode('é', 'text-1'),
         imageWithMime,
@@ -974,6 +1011,7 @@ describe('Taro DOM Replay POC', () => {
     };
     const input = element('input', 'input-1', { value: null });
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root: element('view', 'root-1', {}, [tagOnlyNode, input]),
       MutationObserver: observer.MutationObserver,
       maskAllText: false,
@@ -991,7 +1029,7 @@ describe('Taro DOM Replay POC', () => {
         nullable: null,
         missing: null,
         disabled: null,
-        href: '',
+        href: null,
       }),
     );
     expect(button?.attributes).not.toHaveProperty('onTap');
@@ -1004,6 +1042,7 @@ describe('Taro DOM Replay POC', () => {
     controller.stop();
 
     const unmaskedInputController = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root: element('input', 'input-unmasked', { value: 'public' }),
       MutationObserver: observer.MutationObserver,
       maskInputValues: false,
@@ -1021,6 +1060,7 @@ describe('Taro DOM Replay POC', () => {
   it('stops when a breadcrumb would exceed the event limit', () => {
     const observer = observerHarness();
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root: element('view', 'root-1'),
       MutationObserver: observer.MutationObserver,
       maxEvents: 3,
@@ -1048,6 +1088,7 @@ describe('Taro DOM Replay POC', () => {
     const observer = observerHarness();
     let now = 1_000;
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root: element('view', 'root-1'),
       MutationObserver: observer.MutationObserver,
       maxEvents: 4,
@@ -1083,6 +1124,7 @@ describe('Taro DOM Replay POC', () => {
     const sibling = textNode('sibling', 'sibling-1');
     const root = element('view', 'root-1', {}, [removed, sibling]);
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root,
       MutationObserver: observer.MutationObserver,
       maskAllText: false,
@@ -1150,6 +1192,7 @@ describe('Taro DOM Replay POC', () => {
       const observer = observerHarness();
       const onStop = jest.fn();
       const controller = startTaroDomReplayPoc({
+        blockAllMedia: false,
         root: element('view', 'root-1'),
         MutationObserver: observer.MutationObserver,
         maxDurationMs: 25,
@@ -1174,6 +1217,7 @@ describe('Taro DOM Replay POC', () => {
     const root = element('custom-widget', '', { title: 'temporary' }, [removed]);
     delete root.sid;
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root,
       MutationObserver: observer.MutationObserver,
       now: () => 2_500,
@@ -1220,6 +1264,7 @@ describe('Taro DOM Replay POC', () => {
     }
 
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root: element('view', 'root-1'),
       MutationObserver: CountingObserver,
       maxEvents: 1,

@@ -5,14 +5,27 @@ import {
   getCurrentScope,
   makeOfflineTransport,
   installedIntegrations,
+  eventFromUnknownInput,
+  eventFromMessage as coreEventFromMessage,
+  captureFeedback as coreCaptureFeedback,
+  stackParserFromStackParserOptions,
+  getIntegrationsToSetup,
 } from '@sentry/core';
-import type { BaseTransportOptions, Event, EventHint } from '@sentry/core';
+import type {
+  BaseTransportOptions,
+  Event,
+  EventHint,
+  ParameterizedString,
+  SeverityLevel,
+} from '@sentry/core';
 
-import { appName, getSystemInfo } from './crossPlatform';
-import { configureConsent, isConsentGranted, notifyConsentDrop } from './consent';
+import { appName, getSystemInfo, getAccountInfo } from './crossPlatform';
+import { configureConsent } from './consent';
+import { subscribeAppLifecycle } from './appLifecycle';
 import type { MiniappOptions, ReportDialogOptions, SendFeedbackParams } from './types';
 import { createMiniappTransport, createMiniappOfflineStore } from './transports';
 import { SDK_NAME, SDK_VERSION } from './version';
+import { miniappStackParser } from './stacktrace';
 
 /**
  * The Sentry Miniapp SDK Client.
@@ -22,6 +35,11 @@ import { SDK_NAME, SDK_VERSION } from './version';
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export class MiniappClient extends Client<any> {
+  private _readConsent: () => boolean = () => true;
+  private _writeConsent: (granted: boolean) => void = () => {};
+  private _cleanupResources: () => void = () => {};
+  private _stopTransport: () => void = () => {};
+  private _integrationsCleaned = false;
   /**
    * Creates a new Miniapp SDK instance.
    *
@@ -39,14 +57,43 @@ export class MiniappClient extends Client<any> {
       onDrop: options.onConsentCacheDrop,
     });
 
+    // Each client owns its gate. A second client must not grant an older client's consent.
+    let consentGranted = options.requireConsent !== true;
+    let transportClosed = false;
+    const scopedStore = (storeOptions: Parameters<typeof createMiniappOfflineStore>[0]) => {
+      const store = createMiniappOfflineStore(storeOptions);
+      return {
+        ...store,
+        shift: () =>
+          transportClosed || options.enabled === false ? Promise.resolve(undefined) : store.shift(),
+      };
+    };
+    const storageKey = options.dsn
+      ? `sentry_offline_store:${encodeURIComponent(options.dsn)}`
+      : 'sentry_offline_store';
     super({
       ...options,
+      integrations: getIntegrationsToSetup({
+        ...options,
+        defaultIntegrations: options.defaultIntegrations ?? [],
+      }),
+      sendClientReports: options.sendClientReports ?? true,
+      stackParser: stackParserFromStackParserOptions(options.stackParser || miniappStackParser),
+      _metadata: {
+        ...options._metadata,
+        sdk: {
+          name: SDK_NAME,
+          version: SDK_VERSION,
+          packages: [{ name: 'npm:@xumoses/sentry-miniapp', version: SDK_VERSION }],
+          ...options._metadata?.sdk,
+        },
+      },
       transport: (transportOptions: BaseTransportOptions) => {
         const baseTransport = options.transport
           ? options.transport(transportOptions)
           : createMiniappTransport({
               ...transportOptions,
-              headers: {},
+              ...options.transportOptions,
             });
 
         // 同意门禁：用 core offline transport 的 shouldSend 闸断网络（同意前 envelope 不发、
@@ -57,17 +104,24 @@ export class MiniappClient extends Client<any> {
           return makeOfflineTransport(() => baseTransport)({
             ...transportOptions,
             createStore: (storeOptions: any) =>
-              createMiniappOfflineStore({
+              scopedStore({
                 ...storeOptions,
+                storageKey,
                 // 同意前缓存用独立上限 + 冷启动优先（保留最旧）淘汰，区别于弱网那套默认值。
                 offlineCacheLimit: options.consentCacheLimit ?? 100,
                 offlineCacheMaxAge: options.consentCacheMaxAge,
                 maxBytes: options.consentCacheMaxBytes,
                 evictionMode: 'preserve-oldest',
-                onDrop: notifyConsentDrop,
+                onDrop: (reason, dropped) => {
+                  try {
+                    options.onConsentCacheDrop?.({ reason, dropped });
+                  } catch {
+                    /* observational */
+                  }
+                },
               }),
             // 返回 false → core 不发网络、转 shouldStore 入缓存。同意后恒为 true。
-            shouldSend: () => isConsentGranted(),
+            shouldSend: () => consentGranted,
             flushAtStartup: true,
           } as any);
         }
@@ -76,8 +130,9 @@ export class MiniappClient extends Client<any> {
           return makeOfflineTransport(() => baseTransport)({
             ...transportOptions,
             createStore: (storeOptions: any) =>
-              createMiniappOfflineStore({
+              scopedStore({
                 ...storeOptions,
+                storageKey,
                 offlineCacheLimit: options.offlineCacheLimit,
                 offlineCacheMaxAge: options.offlineCacheMaxAge,
               }),
@@ -89,6 +144,18 @@ export class MiniappClient extends Client<any> {
       },
     });
 
+    this._stopTransport = () => {
+      transportClosed = true;
+    };
+    this._readConsent = () => options.requireConsent !== true || consentGranted;
+    this._writeConsent = (granted) => {
+      consentGranted = granted;
+    };
+    this._cleanupResources = subscribeAppLifecycle({
+      onHide: () => {
+        void Promise.resolve(this.flush(2000)).catch(() => {});
+      },
+    });
     if (options.beforeSendEvent) {
       this.on('beforeSendEvent', options.beforeSendEvent);
     }
@@ -97,36 +164,31 @@ export class MiniappClient extends Client<any> {
   /**
    * @inheritDoc
    */
-  public eventFromException(exception: any): PromiseLike<Event> {
-    const exceptionValue: Record<string, any> = {
-      type: exception.name || 'Error',
-      value: exception.message || String(exception),
-    };
-
-    // 使用 stackParser 解析堆栈信息
-    if (exception.stack) {
-      const stackParser = this.getOptions().stackParser;
-      if (stackParser && typeof stackParser === 'function') {
-        const frames = stackParser(exception.stack, 1);
-        if (frames.length) {
-          exceptionValue['stacktrace'] = { frames };
-        }
-      }
-    }
-
-    return Promise.resolve({
-      exception: {
-        values: [exceptionValue],
-      },
-      level: 'error',
-    } as Event);
+  public eventFromException(exception: unknown, hint?: EventHint): PromiseLike<Event> {
+    const event = eventFromUnknownInput(
+      this,
+      this.getOptions().stackParser || miniappStackParser,
+      exception,
+      hint,
+    );
+    event.level = 'error';
+    return Promise.resolve(event);
   }
 
-  public eventFromMessage(message: string, level: any = 'info'): PromiseLike<Event> {
-    return Promise.resolve({
-      message: message,
-      level,
-    } as Event);
+  public eventFromMessage(
+    message: ParameterizedString,
+    level: SeverityLevel = 'info',
+    hint?: EventHint,
+  ): PromiseLike<Event> {
+    return Promise.resolve(
+      coreEventFromMessage(
+        this.getOptions().stackParser || miniappStackParser,
+        message,
+        level,
+        hint,
+        this.getOptions().attachStacktrace,
+      ),
+    );
   }
 
   protected override _prepareEvent(
@@ -201,14 +263,22 @@ export class MiniappClient extends Client<any> {
       platform: info?.platform || 'unknown',
       ...contexts.device,
     };
+    const system = String(info?.system || '');
+    const parsedSystem = /^(.*?)(?:\s+|_)(\d[\w.+_-]*)$/.exec(system);
     contexts.os = {
-      name: info?.system || 'unknown',
-      version: info?.version || 'unknown',
+      name: parsedSystem?.[1] || system || 'unknown',
+      ...(parsedSystem?.[2] ? { version: parsedSystem[2] } : {}),
       ...contexts.os,
     };
     contexts.app = {
-      app_version: info?.SDKVersion || 'unknown',
+      app_version: getAccountInfo().version || 'unknown',
       ...contexts.app,
+    };
+    contexts['miniapp_host'] = {
+      name: appName(),
+      version: info?.version || 'unknown',
+      sdk_version: info?.SDKVersion || 'unknown',
+      ...contexts['miniapp_host'],
     };
     return event;
   }
@@ -220,10 +290,27 @@ export class MiniappClient extends Client<any> {
    * `_integrations` 字段——后者是 protected、非公开契约，@sentry/core 升级若改名/改结构会
    * 静默失效。`cleanup()` 是本 SDK 集成的自定义方法（非 core Integration 接口的一部分），故做窄类型断言。
    */
+  public override flush(timeout?: number): PromiseLike<boolean> {
+    this._flushOutcomes();
+    return super.flush(timeout);
+  }
+
+  public setConsent(granted: boolean): void {
+    this._writeConsent(granted);
+    if (granted) void Promise.resolve(this.getTransport()?.flush()).catch(() => {});
+  }
+
+  public getConsent(): boolean {
+    return this._readConsent();
+  }
+
   public override close(timeout?: number): PromiseLike<boolean> {
+    this._stopTransport();
+    this._cleanupResources();
     const integrations = this.getOptions().integrations;
-    if (Array.isArray(integrations)) {
-      for (const integration of integrations) {
+    if (!this._integrationsCleaned && Array.isArray(integrations)) {
+      this._integrationsCleaned = true;
+      for (const integration of [...integrations].reverse()) {
         const cleanup = (integration as unknown as { cleanup?: () => void }).cleanup;
         if (typeof cleanup === 'function') {
           try {
@@ -246,7 +333,7 @@ export class MiniappClient extends Client<any> {
         }
       }
     }
-    return super.close(timeout);
+    return Promise.resolve(super.close(timeout)).finally(() => this._stopTransport());
   }
 
   /**
@@ -268,24 +355,12 @@ export class MiniappClient extends Client<any> {
    * @param params Feedback parameters
    * @returns Event ID
    */
-  public captureFeedback(params: SendFeedbackParams): string {
-    const feedbackEvent: Event = {
-      contexts: {
-        feedback: {
-          contact_email: params.email,
-          name: params.name,
-          message: params.message,
-          url: params.url,
-          source: params.source,
-          associated_event_id: params.associatedEventId,
-        },
-      },
-      type: 'feedback',
-      level: 'info',
-      tags: params.tags || {},
-    };
-
-    const scope = getCurrentScope();
-    return scope.captureEvent(feedbackEvent);
+  public captureFeedback(
+    params: SendFeedbackParams,
+    hint?: EventHint & { includeReplay?: boolean },
+  ): string {
+    const scope = getCurrentScope().clone();
+    scope.setClient(this);
+    return coreCaptureFeedback(params, hint, scope);
   }
 }

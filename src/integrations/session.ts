@@ -56,6 +56,7 @@ export class SessionIntegration implements Integration {
   }
 
   public cleanup(): void {
+    if (this._isSessionActive) this._endSession();
     if (this._unsubscribe) {
       this._unsubscribe();
       this._unsubscribe = null;

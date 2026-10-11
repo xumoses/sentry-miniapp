@@ -80,11 +80,11 @@ describe('HttpContext（真 @sentry/core 集成）', () => {
     expect(event).toBeDefined();
     expect(event.contexts.runtime).toEqual({
       name: 'miniapp',
-      version: '2.0.0',
+      version: '3.1.0',
     });
     expect(event.contexts.app).toEqual(
       expect.objectContaining({
-        app_version: '3.1.0',
+        app_version: '1.2.3',
         name: 'wx-app-id',
         version: '1.2.3',
       }),

@@ -2,6 +2,7 @@ import { PageBreadcrumbs } from '../src/integrations/pagebreadcrumbs';
 import { _resetAppLifecycle } from '../src/appLifecycle';
 
 jest.mock('@sentry/core', () => ({
+  getClient: jest.fn(() => ({ getOptions: () => ({ sendDefaultPii: true }) })),
   addBreadcrumb: jest.fn(),
 }));
 

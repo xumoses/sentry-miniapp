@@ -25,7 +25,7 @@ function buildLaunchContext(options) {
 
 // 在 App() 之前初始化 Sentry
 Sentry.init({
-  dsn: 'https://47703e01ba4344b8b252c15e8fd980fd@o113510.ingest.us.sentry.io/1528228',
+  dsn: 'https://public@example.com/1',
   environment: 'production',
   debug: false,
 

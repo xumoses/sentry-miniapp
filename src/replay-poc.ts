@@ -11,7 +11,11 @@
 
 import { uuid4, type Breadcrumb } from '@sentry/core';
 
-import { normalizeReplayRpx, TARO_REPLAY_BASE_STYLESHEET } from './replay-styles';
+import {
+  normalizeReplayRpx,
+  sanitizeReplayStyle,
+  TARO_REPLAY_BASE_STYLESHEET,
+} from './replay-styles';
 import { boundReplayEvents } from './replay-buffer';
 
 export const TARO_DOM_REPLAY_POC_MARKER = 'TARO_DOM_REPLAY_POC';
@@ -32,7 +36,11 @@ const enum RrwebNodeType {
 
 const enum RrwebIncrementalSource {
   Mutation = 0,
+  MouseInteraction = 2,
   Scroll = 3,
+  ViewportResize = 4,
+  Input = 5,
+  TouchMove = 6,
 }
 
 interface TaroAttributeLike {
@@ -42,6 +50,9 @@ interface TaroAttributeLike {
 
 export interface TaroReplayScrollEventLike {
   detail?: { scrollTop?: unknown; scrollLeft?: unknown; value?: unknown };
+  target?: { nodeType?: number; sid?: string; id?: string; dataset?: { sid?: string } };
+  touches?: Array<{ clientX?: number; clientY?: number; pageX?: number; pageY?: number }>;
+  changedTouches?: Array<{ clientX?: number; clientY?: number; pageX?: number; pageY?: number }>;
 }
 
 export interface TaroReplayNodeLike {
@@ -158,6 +169,14 @@ export interface StartTaroDomReplayPocOptions {
   maskAllText?: boolean;
   /** Masks ordinary inputs by default; password and explicitly marked inputs always stay masked. */
   maskInputValues?: boolean;
+  /** Official Replay spelling; overrides maskInputValues when provided. */
+  maskAllInputs?: boolean;
+  /** Defaults to true; audited staticImageSources are an explicit per-image permission. */
+  blockAllMedia?: boolean;
+  /** Attributes whose display text is masked; defaults to title, placeholder and aria-label. */
+  maskAttributes?: readonly string[];
+  /** Stop an excessive observer batch rather than blocking the application logic thread. */
+  mutationLimit?: number;
   maxDurationMs?: number;
   maxEvents?: number;
   maxBytes?: number;
@@ -175,6 +194,10 @@ export interface TaroDomReplayPocController {
   addBreadcrumb(breadcrumb: Breadcrumb): boolean;
   getCapture(): TaroReplayPocCapture;
   stop(reason?: string): TaroReplayPocCapture;
+  /** Drain a session segment without detaching; rolling buffers are returned without draining. */
+  takeSegment(): TaroReplayPocCapture;
+  recordPageScroll(position: { scrollTop?: number; scrollLeft?: number }): boolean;
+  recordViewport(size: { width: number; height: number }): boolean;
 }
 
 const TAG_MAP: Record<string, string> = {
@@ -197,6 +220,17 @@ const TAG_MAP: Record<string, string> = {
 };
 
 const SELF_CLOSING_TAGS = new Set(['img', 'input']);
+const MEDIA_NODE_NAMES = new Set([
+  'image',
+  'img',
+  'video',
+  'audio',
+  'live-player',
+  'live-pusher',
+  'camera',
+  'canvas',
+  'web-view',
+]);
 const SYNTHETIC_NODE_MAX_ID = 9;
 const MAX_STATIC_IMAGE_SOURCE_BYTES = 128 * 1024;
 const STATIC_IMAGE_DATA_URI =
@@ -222,7 +256,14 @@ function isStaticImageDataUri(value: string): boolean {
   }
 }
 
-const URL_ATTRIBUTE_NAMES = new Set(['action', 'formaction', 'href', 'poster', 'src']);
+const URL_ATTRIBUTE_NAMES = new Set([
+  'action',
+  'formaction',
+  'href',
+  'poster',
+  'src',
+  'xlink:href',
+]);
 const INPUT_MASK_ATTRIBUTE_NAMES = new Set(['password', 'type', 'data-sentry-mask']);
 const SENSITIVE_ATTRIBUTE_NAME =
   /(?:authorization|cookie|token|password|passwd|secret|api[-_]?key|open[-_]?id|union[-_]?id|phone|email|idcard|user[-_]?id|account)/i;
@@ -236,6 +277,8 @@ interface ScrollPosition {
 // creates a new recorder. Weak keys release the offset with the virtual node.
 const scrollPositions = new WeakMap<TaroReplayNodeLike, ScrollPosition>();
 const pickerValues = new WeakMap<TaroReplayNodeLike, number[]>();
+const pageScrollPositions = new WeakMap<TaroReplayNodeLike, ScrollPosition>();
+const inputValues = new WeakMap<TaroReplayNodeLike, { value: unknown; propValue: unknown }>();
 // A mounted input remains sensitive across buffer promotion and page reattachment.
 // Object identity avoids retaining unmounted nodes or inheriting a reused sid.
 const sensitiveInputs = new WeakSet<TaroReplayNodeLike>();
@@ -334,9 +377,13 @@ function sanitizeUrl(value: string): string {
     return `data:${mimeType}`;
   }
 
-  const withoutQueryOrFragment = value.split(/[?#]/, 1)[0] || '';
+  if (/^(?:javascript|vbscript|blob):/i.test(dataUrlCandidate)) return '[Filtered]';
+  const withoutQueryOrFragment = (dataUrlCandidate.split(/[?#]/, 1)[0] || '').replace(
+    /^((?:https?|wss?|ftp):)[\\/]*/i,
+    '$1//',
+  );
   return withoutQueryOrFragment.replace(
-    /^([a-z][a-z0-9+.-]*:\/\/)([^/?#@]+@)/i,
+    /^((?:[a-z][a-z0-9+.-]*:)?[\\/]{2})([^\\/]*@)/i,
     '$1[filtered]:[filtered]@',
   );
 }
@@ -354,6 +401,17 @@ function primitiveAttributeValue(value: unknown): string | number | true | null 
   if (value === true) return true;
   if (typeof value === 'number') return value;
   return String(value);
+}
+
+function boundedInteger(
+  value: number | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(minimum, Math.min(maximum, Math.floor(value)))
+    : fallback;
 }
 
 function maskValue(value: unknown): string {
@@ -380,6 +438,12 @@ function hasMaskingFlag(node: TaroReplayNodeLike, name: string): boolean {
   return value === true || value === 1 || value === '' || value === 'true' || value === '1';
 }
 
+function privacyMarker(node: TaroReplayNodeLike, name: string): boolean {
+  if (hasMaskingFlag(node, `data-sentry-${name}`)) return true;
+  const className = rawAttributeValue(node, 'class') ?? rawAttributeValue(node, 'classname');
+  return typeof className === 'string' && className.split(/\s+/).includes(`sentry-${name}`);
+}
+
 function sanitizeAttributeValue(
   node: TaroReplayNodeLike,
   name: string,
@@ -389,7 +453,11 @@ function sanitizeAttributeValue(
   let safeValue = value;
   if (SENSITIVE_ATTRIBUTE_NAME.test(name)) {
     safeValue = '[Filtered]';
-  } else if (maskInputValues && isInputNode(node) && name.toLowerCase() === 'value') {
+  } else if (
+    maskInputValues &&
+    isInputNode(node) &&
+    ['value', 'defaultvalue'].includes(name.toLowerCase())
+  ) {
     safeValue = maskValue(value);
   } else if (URL_ATTRIBUTE_NAMES.has(name.toLowerCase())) {
     safeValue = sanitizeUrl(String(value ?? ''));
@@ -425,7 +493,7 @@ function utf8ByteLength(value: string): number {
 function cloneCapture(capture: TaroReplayPocCapture): TaroReplayPocCapture {
   return {
     ...capture,
-    events: capture.events.slice(),
+    events: JSON.parse(JSON.stringify(capture.events)) as TaroReplayPocEvent[],
     metadata: capture.metadata
       ? {
           ...capture.metadata,
@@ -455,13 +523,25 @@ export function startTaroDomReplayPoc(
 
   const now = options.now || Date.now;
   const startedAt = now();
-  const maxDurationMs = options.maxDurationMs ?? 30_000;
-  const maxEvents = options.maxEvents ?? 500;
-  const maxBytes = options.maxBytes ?? 512 * 1024;
+  const maxDurationMs = boundedInteger(options.maxDurationMs, 30_000, 1, 60 * 60_000);
+  const maxEvents = boundedInteger(options.maxEvents, 500, 1, 100_000);
+  const maxBytes = boundedInteger(options.maxBytes, 512 * 1024, 1, 20 * 1024 * 1024);
+  const mutationLimit = boundedInteger(options.mutationLimit, 10_000, 1, 100_000);
+  const rollingWindowMs =
+    options.rollingWindowMs === undefined
+      ? undefined
+      : boundedInteger(options.rollingWindowMs, 30_000, 0, 60_000);
   const maskAllText = options.maskAllText !== false;
-  const maskInputValues = options.maskInputValues !== false;
-  const viewportWidth = options.width ?? 375;
-  const stylesheet = normalizeReplayRpx(
+  const maskInputValues = options.maskAllInputs ?? options.maskInputValues !== false;
+  const blockAllMedia = options.blockAllMedia !== false;
+  const maskAttributes = new Set(
+    (options.maskAttributes ?? ['title', 'placeholder', 'aria-label']).map((name) =>
+      name.toLowerCase(),
+    ),
+  );
+  let viewportWidth = boundedInteger(options.width, 375, 1, 100_000);
+  let viewportHeight = boundedInteger(options.height, 667, 1, 100_000);
+  let stylesheet = normalizeReplayRpx(
     `${TARO_REPLAY_BASE_STYLESHEET}\n${options.stylesheet || ''}`,
     viewportWidth,
   );
@@ -471,15 +551,26 @@ export function startTaroDomReplayPoc(
     if (
       hasMaskingFlag(node, 'password') ||
       String(rawAttributeValue(node, 'type') ?? '').toLowerCase() === 'password' ||
-      hasNodeAncestor(node, (ancestor) => hasMaskingFlag(ancestor, 'data-sentry-mask'))
+      hasNodeAncestor(node, (ancestor) => privacyMarker(ancestor, 'mask'))
     ) {
       // A password reveal toggle must not turn this mounted input into clear text.
       sensitiveInputs.add(node);
     }
     return maskInputValues || sensitiveInputs.has(node);
   }
+  const isBlocked = (node: TaroReplayNodeLike): boolean =>
+    hasNodeAncestor(node, (ancestor) => privacyMarker(ancestor, 'block'));
+  const isMasked = (node: TaroReplayNodeLike): boolean =>
+    hasNodeAncestor(node, (ancestor) => privacyMarker(ancestor, 'mask'));
+  const isUnmasked = (node: TaroReplayNodeLike): boolean =>
+    hasNodeAncestor(node, (ancestor) => privacyMarker(ancestor, 'unmask'));
+  const shouldMaskText = (node: TaroReplayNodeLike): boolean =>
+    isMasked(node) || (maskAllText && !isUnmasked(node));
+  const shouldBlockMedia = (node: TaroReplayNodeLike): boolean =>
+    blockAllMedia && !hasNodeAncestor(node, (ancestor) => privacyMarker(ancestor, 'unblock'));
   const warnings = new Set<string>();
   const idsBySid = new Map<string, number>();
+  const nodesBySid = new Map<string, TaroReplayNodeLike>();
   const idsByNode = new WeakMap<object, number>();
   const lastTextValues = new WeakMap<object, string>();
   const lastAttributeValues = new WeakMap<object, Map<string, string | number | true | null>>();
@@ -489,6 +580,17 @@ export function startTaroDomReplayPoc(
   let nextNodeId = SYNTHETIC_NODE_MAX_ID + 1;
   let mutationCount = 0;
   let stopped = false;
+  let pagePosition = pageScrollPositions.get(options.root) ?? { x: 0, y: 0 };
+  const rootListeners = new Map<string, (event: TaroReplayScrollEventLike) => void>();
+  const lastInputValues = new WeakMap<TaroReplayNodeLike, string>();
+  const byteSizes = new WeakMap<TaroReplayPocEvent, number>();
+  const eventSize = (event: TaroReplayPocEvent): number => {
+    const cached = byteSizes.get(event);
+    if (cached !== undefined) return cached;
+    const bytes = utf8ByteLength(JSON.stringify(event));
+    byteSizes.set(event, bytes);
+    return bytes;
+  };
   const resources: {
     timer?: ReturnType<typeof setTimeout>;
     observer?: TaroReplayMutationObserverLike;
@@ -517,8 +619,12 @@ export function startTaroDomReplayPoc(
   function idFor(node: TaroReplayNodeLike): number {
     const sid = node.sid || node.uid;
     if (sid) {
+      nodesBySid.set(sid, node);
       const existing = idsBySid.get(sid);
-      if (existing !== undefined) return existing;
+      if (existing !== undefined) {
+        idsByNode.set(node, existing);
+        return existing;
+      }
       const id = nextNodeId++;
       idsBySid.set(sid, id);
       idsByNode.set(node, id);
@@ -533,7 +639,7 @@ export function startTaroDomReplayPoc(
   }
 
   function attachScrollSubtree(node: TaroReplayNodeLike): void {
-    if (stopped) return;
+    if (stopped || isBlocked(node)) return;
     if (
       isScrollView(node) &&
       node.addEventListener &&
@@ -541,7 +647,7 @@ export function startTaroDomReplayPoc(
       !scrollListeners.has(node)
     ) {
       const listener = (event: TaroReplayScrollEventLike): void => {
-        if (stopped || scrollListeners.get(node) !== listener) return;
+        if (stopped || isBlocked(node) || scrollListeners.get(node) !== listener) return;
         const previous = getScrollPosition(node);
         const position = {
           x: scrollCoordinate(event.detail?.scrollLeft) ?? previous.x,
@@ -571,6 +677,7 @@ export function startTaroDomReplayPoc(
       const listener = (event: TaroReplayScrollEventLike): void => {
         if (
           stopped ||
+          isBlocked(node) ||
           pickerListeners.get(node) !== listener ||
           !Array.isArray(event.detail?.value)
         )
@@ -605,6 +712,11 @@ export function startTaroDomReplayPoc(
   }
 
   function detachScrollSubtree(node: TaroReplayNodeLike): void {
+    const sid = node.sid || node.uid;
+    if (sid && nodesBySid.get(sid) === node) {
+      nodesBySid.delete(sid);
+      idsBySid.delete(sid);
+    }
     const listener = scrollListeners.get(node);
     if (listener) {
       try {
@@ -632,6 +744,19 @@ export function startTaroDomReplayPoc(
     value: unknown,
     maskNodeInputValues: boolean,
   ): string | number | true | null {
+    if (value === null || value === undefined) return null;
+    if (/^on/i.test(name)) return null;
+    const lowerName = name.toLowerCase();
+    // Taro Image has one src, not a browser srcset. Never bypass its media policy with unknown candidates.
+    if (lowerName === 'srcset') return null;
+    if (lowerName.endsWith('style') && typeof value === 'string') {
+      return sanitizeReplayStyle(value, sanitizeUrl, shouldBlockMedia(node));
+    }
+    if (
+      (isMasked(node) && ['title', 'placeholder', 'aria-label', 'alt'].includes(lowerName)) ||
+      (maskAttributes.has(lowerName) && !isUnmasked(node))
+    )
+      return maskValue(value);
     if (
       normaliseNodeName(node) === 'image' &&
       name.toLowerCase() === 'src' &&
@@ -648,14 +773,35 @@ export function startTaroDomReplayPoc(
         isStaticImageDataUri(trusted)
       )
         return trusted;
+      if (shouldBlockMedia(node)) return null;
     }
+    if (
+      MEDIA_NODE_NAMES.has(normaliseNodeName(node)) &&
+      shouldBlockMedia(node) &&
+      URL_ATTRIBUTE_NAMES.has(lowerName)
+    )
+      return null;
     return sanitizeAttributeValue(node, name, value, maskNodeInputValues);
+  }
+
+  function currentInputValue(node: TaroReplayNodeLike): unknown {
+    const propValue = rawAttributeValue(node, 'value');
+    const observed = inputValues.get(node);
+    return observed && observed.propValue === propValue ? observed.value : propValue;
+  }
+
+  function safeInputValue(node: TaroReplayNodeLike, value: unknown): string {
+    return shouldMaskInputValues(node) ? maskValue(value) : String(value ?? '');
   }
 
   function pickerPlaybackStyle(node: TaroReplayNodeLike, original: unknown): string {
     const declarations = [typeof original === 'string' ? original : ''];
     if (isPickerView(node)) {
-      const indicator = String(rawAttributeValue(node, 'indicatorstyle') ?? '');
+      const indicator = sanitizeReplayStyle(
+        String(rawAttributeValue(node, 'indicatorstyle') ?? ''),
+        sanitizeUrl,
+        shouldBlockMedia(node),
+      );
       const height = /(?:^|;)\s*height\s*:\s*([^;]+)/i.exec(indicator)?.[1] ?? '34px';
       declarations.push(
         `--taro-replay-picker-item-height:${normalizeReplayRpx(height, viewportWidth)}`,
@@ -691,6 +837,11 @@ export function startTaroDomReplayPoc(
       const playbackName = attribute.name === 'className' ? 'class' : attribute.name;
       result[playbackName] = value;
       remembered.set(attribute.name, value);
+    }
+    if (isInputNode(node)) {
+      result['value'] = safeInputValue(node, currentInputValue(node));
+      remembered.set('value', result['value']);
+      lastInputValues.set(node, String(result['value']));
     }
     if (isScrollView(node)) {
       const position = getScrollPosition(node);
@@ -729,9 +880,18 @@ export function startTaroDomReplayPoc(
     portals?: SerializedElementNode[],
   ): SerializedNode {
     const nodeName = normaliseNodeName(node);
+    if (isBlocked(node)) {
+      return {
+        id: idFor(node),
+        type: RrwebNodeType.Element,
+        tagName: 'div',
+        attributes: { 'data-taro-node': nodeName, 'data-sentry-blocked': true },
+        childNodes: [],
+      };
+    }
     if (node.nodeType === 3 || nodeName === '#text' || nodeName === 'comment') {
       const comment = nodeName === 'comment';
-      const textContent = maskAllText
+      const textContent = shouldMaskText(node)
         ? maskValue(node.textContent)
         : String(node.textContent ?? '');
       lastTextValues.set(node, textContent);
@@ -802,11 +962,15 @@ export function startTaroDomReplayPoc(
 
   function addEvent(event: TaroReplayPocEvent): boolean {
     if (stopped) return false;
-    const eventBytes = utf8ByteLength(JSON.stringify(event));
-    if (options.rollingWindowMs !== undefined) {
+    const eventBytes = eventSize(event);
+    if (rollingWindowMs !== undefined) {
       const meta = capture.events[0];
       if (event.type === RrwebEventType.FullSnapshot && meta?.type === RrwebEventType.Meta) {
-        const alignedMeta = { ...meta, timestamp: event.timestamp - 1 };
+        const alignedMeta = {
+          ...meta,
+          timestamp: event.timestamp - 1,
+          data: { ...meta.data, width: viewportWidth, height: viewportHeight },
+        };
         const checkpointBytes = utf8ByteLength(JSON.stringify(alignedMeta)) + eventBytes;
         if (checkpointBytes > maxBytes || maxEvents < 2) {
           stop('limit');
@@ -823,7 +987,7 @@ export function startTaroDomReplayPoc(
           capture.startedAt = alignedMeta.timestamp;
           capture.stats.approximateBytes = checkpointBytes;
           capture.stats.eventCount = capture.events.length;
-          options.onEvent?.(event);
+          options.onEvent?.(JSON.parse(JSON.stringify(event)) as TaroReplayPocEvent);
           return true;
         }
       }
@@ -834,9 +998,10 @@ export function startTaroDomReplayPoc(
       if (capture.events.some((candidate) => candidate.type === RrwebEventType.FullSnapshot)) {
         const bounded = boundReplayEvents(capture.events, {
           now: event.timestamp,
-          windowMs: options.rollingWindowMs,
+          windowMs: rollingWindowMs,
           maxEvents,
           maxBytes,
+          eventBytes: eventSize,
         });
         if (!bounded.length) {
           capture.events = previousEvents;
@@ -847,12 +1012,12 @@ export function startTaroDomReplayPoc(
         capture.events = bounded;
         capture.startedAt = bounded[0]?.timestamp ?? capture.startedAt;
         capture.stats.approximateBytes = bounded.reduce(
-          (total, candidate) => total + utf8ByteLength(JSON.stringify(candidate)),
+          (total, candidate) => total + eventSize(candidate),
           0,
         );
       }
       capture.stats.eventCount = capture.events.length;
-      options.onEvent?.(event);
+      options.onEvent?.(JSON.parse(JSON.stringify(event)) as TaroReplayPocEvent);
       return capture.events.includes(event);
     }
     if (
@@ -866,7 +1031,7 @@ export function startTaroDomReplayPoc(
     capture.events.push(event);
     capture.stats.eventCount = capture.events.length;
     capture.stats.approximateBytes += eventBytes;
-    options.onEvent?.(event);
+    options.onEvent?.(JSON.parse(JSON.stringify(event)) as TaroReplayPocEvent);
     return true;
   }
 
@@ -948,6 +1113,169 @@ export function startTaroDomReplayPoc(
     return true;
   }
 
+  function recordPageScroll(position: { scrollTop?: number; scrollLeft?: number }): boolean {
+    if (stopped) return false;
+    const next = {
+      x: scrollCoordinate(position.scrollLeft) ?? pagePosition.x,
+      y: scrollCoordinate(position.scrollTop) ?? pagePosition.y,
+    };
+    if (next.x === pagePosition.x && next.y === pagePosition.y) return false;
+    pagePosition = next;
+    pageScrollPositions.set(options.root, next);
+    return addEvent({
+      type: RrwebEventType.IncrementalSnapshot,
+      timestamp: nextTimestamp(),
+      data: { source: RrwebIncrementalSource.Scroll, id: 1, ...next },
+    });
+  }
+
+  function recordViewport(size: { width: number; height: number }): boolean {
+    if (
+      stopped ||
+      !Number.isFinite(size.width) ||
+      size.width <= 0 ||
+      !Number.isFinite(size.height) ||
+      size.height <= 0 ||
+      (size.width === viewportWidth && size.height === viewportHeight)
+    )
+      return false;
+    viewportWidth = size.width;
+    viewportHeight = size.height;
+    stylesheet = normalizeReplayRpx(
+      `${TARO_REPLAY_BASE_STYLESHEET}\n${options.stylesheet || ''}`,
+      viewportWidth,
+    );
+    if (
+      !addEvent({
+        type: RrwebEventType.IncrementalSnapshot,
+        timestamp: nextTimestamp(),
+        data: {
+          source: RrwebIncrementalSource.ViewportResize,
+          width: viewportWidth,
+          height: viewportHeight,
+        },
+      })
+    )
+      return false;
+    return addEvent({
+      type: RrwebEventType.FullSnapshot,
+      timestamp: nextTimestamp(),
+      data: { node: fullSnapshot(), initialOffset: { top: pagePosition.y, left: pagePosition.x } },
+    });
+  }
+
+  function takeSegment(): TaroReplayPocCapture {
+    const segment = cloneCapture(capture);
+    if (stopped || rollingWindowMs !== undefined) return segment;
+    segment.endedAt = Math.max(now(), lastEventTimestamp);
+    segment.stopReason = 'segment';
+    capture.startedAt = segment.endedAt;
+    capture.events = [];
+    capture.stats = {
+      eventCount: 0,
+      mutationCount: 0,
+      breadcrumbCount: 0,
+      networkCount: 0,
+      approximateBytes: 0,
+    };
+    mutationCount = 0;
+    return segment;
+  }
+
+  function attachInteractions(): void {
+    const root = options.root;
+    if (!root.addEventListener || !root.removeEventListener) return;
+    const interactions: Record<string, number> = {
+      tap: 2,
+      focus: 5,
+      blur: 6,
+      touchstart: 7,
+      touchend: 9,
+      touchcancel: 10,
+    };
+    let lastTouchMoveAt = -Infinity;
+    for (const name of [...Object.keys(interactions), 'touchmove', 'input', 'change']) {
+      const listener = (event: TaroReplayScrollEventLike): void => {
+        if (stopped) return;
+        const target = event.target;
+        const sid = target?.dataset?.sid ?? target?.sid ?? target?.id;
+        const node = target?.nodeType
+          ? (target as TaroReplayNodeLike)
+          : sid
+            ? nodesBySid.get(sid)
+            : undefined;
+        if (
+          !node ||
+          !idsByNode.has(node) ||
+          isBlocked(node) ||
+          hasNodeAncestor(node, (ancestor) => privacyMarker(ancestor, 'ignore'))
+        )
+          return;
+        if (name === 'input' || name === 'change') {
+          if (!isInputNode(node) || event.detail?.value === undefined) return;
+          const value = event.detail.value;
+          // A native value may precede its controlled prop update. Never write application props.
+          inputValues.set(node, { value, propValue: rawAttributeValue(node, 'value') });
+          const text = safeInputValue(node, value);
+          if (lastInputValues.get(node) === text) return;
+          lastInputValues.set(node, text);
+          lastAttributeValues.get(node)?.set('value', text);
+          addEvent({
+            type: RrwebEventType.IncrementalSnapshot,
+            timestamp: nextTimestamp(),
+            data: { source: RrwebIncrementalSource.Input, id: idFor(node), text, isChecked: false },
+          });
+          return;
+        }
+        const touch = event.changedTouches?.[0] ?? event.touches?.[0];
+        const x =
+          touch?.clientX ??
+          (typeof touch?.pageX === 'number' ? touch.pageX - pagePosition.x : undefined);
+        const y =
+          touch?.clientY ??
+          (typeof touch?.pageY === 'number' ? touch.pageY - pagePosition.y : undefined);
+        if (name === 'touchmove') {
+          if (!Number.isFinite(x) || !Number.isFinite(y) || now() - lastTouchMoveAt < 50) return;
+          lastTouchMoveAt = now();
+          addEvent({
+            type: RrwebEventType.IncrementalSnapshot,
+            timestamp: nextTimestamp(),
+            data: {
+              source: RrwebIncrementalSource.TouchMove,
+              positions: [{ id: idFor(node), x, y, timeOffset: 0 }],
+            },
+          });
+          return;
+        }
+        // Focus/blur do not need coordinates. Other interactions use only real platform coordinates.
+        if (name !== 'focus' && name !== 'blur' && (!Number.isFinite(x) || !Number.isFinite(y)))
+          return;
+        addEvent({
+          type: RrwebEventType.IncrementalSnapshot,
+          timestamp: nextTimestamp(),
+          data: {
+            source: RrwebIncrementalSource.MouseInteraction,
+            type: interactions[name],
+            id: idFor(node),
+            ...(typeof x === 'number' && typeof y === 'number' ? { x, y } : {}),
+          },
+        });
+        if (name === 'tap')
+          addBreadcrumb({
+            category: 'ui.click',
+            message: normaliseNodeName(node),
+            data: { nodeId: idFor(node) },
+          });
+      };
+      try {
+        root.addEventListener(name, listener);
+        rootListeners.set(name, listener);
+      } catch {
+        /* Unsupported native events are optional. */
+      }
+    }
+  }
+
   function currentAttributeValue(
     node: TaroReplayNodeLike,
     attributeName: string,
@@ -966,7 +1294,13 @@ export function startTaroDomReplayPoc(
         normaliseNodeName(node) === 'picker-view-column' ||
         normaliseNodeName(node.parentNode ?? node) === 'picker-view-column')
     ) {
-      return pickerPlaybackStyle(node, normalizeReplayRpx(String(raw ?? ''), viewportWidth));
+      return pickerPlaybackStyle(
+        node,
+        normalizeReplayRpx(
+          sanitizeReplayStyle(String(raw ?? ''), sanitizeUrl, shouldBlockMedia(node)),
+          viewportWidth,
+        ),
+      );
     }
     if (attributeName === 'style' && (raw === null || raw === undefined || raw === '')) return null;
     const value = replayAttributeValue(node, attributeName, raw, shouldMaskInputValues(node));
@@ -977,13 +1311,25 @@ export function startTaroDomReplayPoc(
 
   function handleMutations(records: TaroReplayMutationRecordLike[]): void {
     if (stopped) return;
+    if (records.length > mutationLimit) {
+      stop('mutation-limit');
+      return;
+    }
     const visualCheckpoint = records.some(
       (record) =>
         (record.type === 'attributes' &&
           ((isRootPortal(record.target) && record.attributeName?.toLowerCase() === 'enable') ||
             // An ancestor marker changes descendant privacy without an input mutation.
+            ['data-sentry-unmask', 'data-sentry-block', 'data-sentry-unblock'].includes(
+              record.attributeName?.toLowerCase() ?? '',
+            ) ||
             (record.attributeName?.toLowerCase() === 'data-sentry-mask' &&
               !isInputNode(record.target)) ||
+            (['class', 'classname'].includes(record.attributeName?.toLowerCase() ?? '') &&
+              /sentry-(?:mask|unmask|block|unblock)/.test(
+                String(rawAttributeValue(record.target, record.attributeName!) ?? '') +
+                  String(lastAttributeValues.get(record.target)?.get(record.attributeName!) ?? ''),
+              )) ||
             (isPickerView(record.target) &&
               ['value', 'defaultvalue', 'indicatorstyle'].includes(
                 record.attributeName?.toLowerCase() ?? '',
@@ -996,6 +1342,9 @@ export function startTaroDomReplayPoc(
             ))),
     );
     if (visualCheckpoint) {
+      for (const node of [...scrollListeners.keys(), ...pickerListeners.keys()]) {
+        if (isBlocked(node)) detachScrollSubtree(node);
+      }
       for (const record of records) {
         mutationCount++;
         if (record.type === 'childList') {
@@ -1012,8 +1361,12 @@ export function startTaroDomReplayPoc(
       addEvent({
         type: RrwebEventType.FullSnapshot,
         timestamp: nextTimestamp(),
-        data: { node: fullSnapshot(), initialOffset: { top: 0, left: 0 } },
+        data: {
+          node: fullSnapshot(),
+          initialOffset: { top: pagePosition.y, left: pagePosition.x },
+        },
       });
+      attachScrollSubtree(options.root);
       if (!stopped) capture.stats.mutationCount = mutationCount;
       capture.warnings = Array.from(warnings);
       return;
@@ -1026,11 +1379,13 @@ export function startTaroDomReplayPoc(
     }> = [];
     const removes: Array<{ parentId: number; id: number }> = [];
     const adds: Array<{ parentId: number; nextId: number | null; node: SerializedNode }> = [];
+    const inputs: Array<{ id: number; text: string }> = [];
 
     for (const record of records) {
+      if (isBlocked(record.target)) continue;
       mutationCount++;
       if (record.type === 'characterData') {
-        const value = maskAllText
+        const value = shouldMaskText(record.target)
           ? maskValue(record.target.textContent)
           : String(record.target.textContent ?? '');
         if (lastTextValues.get(record.target) === value) continue;
@@ -1070,11 +1425,21 @@ export function startTaroDomReplayPoc(
         }
         if (!Object.keys(changedAttributes).length) continue;
         attributes.push({ id: idFor(record.target), attributes: changedAttributes });
+        if (
+          isInputNode(record.target) &&
+          Object.prototype.hasOwnProperty.call(changedAttributes, 'value')
+        ) {
+          const text = String(changedAttributes['value'] ?? '');
+          if (lastInputValues.get(record.target) !== text) {
+            lastInputValues.set(record.target, text);
+            inputs.push({ id: idFor(record.target), text });
+          }
+        }
       } else if (record.type === 'childList') {
         const parentId = idFor(record.target);
         for (const removedNode of toArray(record.removedNodes)) {
-          detachScrollSubtree(removedNode);
           removes.push({ parentId, id: idFor(removedNode) });
+          detachScrollSubtree(removedNode);
         }
         for (const addedNode of toArray(record.addedNodes)) {
           if (addedNode.nodeType === 1) needsStructuralCheckpoint = true;
@@ -1101,6 +1466,12 @@ export function startTaroDomReplayPoc(
         adds,
       },
     });
+    for (const input of inputs)
+      addEvent({
+        type: RrwebEventType.IncrementalSnapshot,
+        timestamp: nextTimestamp(),
+        data: { source: RrwebIncrementalSource.Input, ...input, isChecked: false },
+      });
     if (!stopped) capture.stats.mutationCount = mutationCount;
     if (needsStructuralCheckpoint && !stopped) {
       addEvent({
@@ -1108,7 +1479,7 @@ export function startTaroDomReplayPoc(
         timestamp: nextTimestamp(),
         data: {
           node: fullSnapshot(),
-          initialOffset: { top: 0, left: 0 },
+          initialOffset: { top: pagePosition.y, left: pagePosition.x },
         },
       });
     }
@@ -1119,6 +1490,16 @@ export function startTaroDomReplayPoc(
     stopped = true;
     if (resources.timer) clearTimeout(resources.timer);
     resources.observer?.disconnect();
+    for (const [name, listener] of rootListeners) {
+      try {
+        options.root.removeEventListener?.(name, listener);
+      } catch {
+        /* Safe native teardown. */
+      }
+    }
+    rootListeners.clear();
+    nodesBySid.clear();
+    idsBySid.clear();
     for (const [node, listener] of pickerListeners) {
       try {
         node.removeEventListener?.('change', listener);
@@ -1147,6 +1528,9 @@ export function startTaroDomReplayPoc(
     addBreadcrumb,
     getCapture: () => cloneCapture(capture),
     stop,
+    takeSegment,
+    recordPageScroll,
+    recordViewport,
   };
 
   addEvent({
@@ -1154,8 +1538,8 @@ export function startTaroDomReplayPoc(
     timestamp: nextTimestamp(startedAt),
     data: {
       href: capture.href,
-      width: options.width ?? 375,
-      height: options.height ?? 667,
+      width: viewportWidth,
+      height: viewportHeight,
     },
   });
   addEvent({
@@ -1163,7 +1547,7 @@ export function startTaroDomReplayPoc(
     timestamp: nextTimestamp(startedAt),
     data: {
       node: fullSnapshot(),
-      initialOffset: { top: 0, left: 0 },
+      initialOffset: { top: pagePosition.y, left: pagePosition.x },
     },
   });
 
@@ -1180,6 +1564,7 @@ export function startTaroDomReplayPoc(
     subtree: true,
   });
   attachScrollSubtree(options.root);
+  attachInteractions();
   resources.timer = setTimeout(() => stop('duration'), maxDurationMs);
 
   return controller;

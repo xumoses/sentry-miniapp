@@ -4,12 +4,15 @@
 [![npm download](https://img.shields.io/npm/dm/%40xumoses%2Fsentry-miniapp)](https://www.npmjs.com/package/@xumoses/sentry-miniapp)
 [![github forks](https://img.shields.io/github/forks/lizhiyao/sentry-miniapp?style=social)](https://github.com/lizhiyao/sentry-miniapp/network/members)
 [![github stars](https://img.shields.io/github/stars/lizhiyao/sentry-miniapp?style=social)](https://github.com/lizhiyao/sentry-miniapp/stargazers)
-![test coverage](https://img.shields.io/badge/test%20coverage-100%25-brightgreen.svg)
 [![Sentry Community SDK](https://img.shields.io/badge/Sentry-Community%20SDK-362d59?logo=sentry)](https://docs.sentry.io/platforms/#sdks-supported-by-our-community)
 [![license](https://img.shields.io/github/license/lizhiyao/sentry-miniapp)](./LICENSE)
 [![文档站 docs](https://img.shields.io/badge/docs-sentry--miniapp.pages.dev-3eaf7c?logo=readthedocs&logoColor=white)](https://sentry-miniapp.pages.dev/)
 
 简体中文 | [English](./README.en.md)
+
+当前基于固定 `@sentry/core@10.66.0`。完整事件与 scopes、页面及 HTTP tracing、手动日志/指标、反馈/附件和发送控制的实现、默认值及平台边界见[官方能力矩阵](./docs/official-sdk-alignment.md)。日志通过 `enableLogs:true` 和显式 `Sentry.logger` 调用启用；指标使用 `Sentry.metrics`，两者均不默认抓取 console。Tracing 需设置 `tracesSampleRate` 或 `tracesSampler`；`tracePropagationTargets:[]` 禁止 trace header 注入，推荐使用可信域的锚定正则。`enablePageTracing:false` 关闭原生 Page/Taro 页面自动 span。
+
+`defaultIntegrations:false` 禁用完整默认集合；`integrations` 函数可筛选平台默认集成。默认不采集请求体、页面 query 值、事件 dataset 或异常实参。App hide 会尽力 flush；`close()` 停止客户端及后续缓存重试，保留未发送缓存供下次启动使用。本地通过不代替 npm 发布后的真机和 Sentry 服务端验收。
 
 一个基于 `@sentry/core` 核心构建的**小程序监控 SDK**，提供**异常监控**、**性能监控**、离线缓存、分布式追踪等能力。支持微信、支付宝、字节跳动、百度、QQ、钉钉、快手等多端小程序，以及微信 / 抖音等**小游戏**，并兼容 Taro / uni-app 等跨端框架。
 
@@ -45,8 +48,8 @@
 - **🎯 全自动异常捕获**：无需侵入业务代码，自动监听并上报生命周期异常（`onError`、`onUnhandledRejection`、`onPageNotFound`、`onMemoryWarning`）。
 - **🍞 丰富的上下文面包屑**：自动记录设备信息、用户点击 / 触摸、网络请求（XHR）以及页面生命周期。
 - **🗺️ 内置 SourceMap 路径抹平**：自动统一多端虚拟堆栈路径，配合 sentry-cli 极简实现 Source Map 解析。
-- **📡 弱网离线缓存**：断网或发送失败时自动缓存事件到本地 Storage，网络恢复后静默重试，确保数据不丢失。
-- **⚡ 深度性能监控**：采集导航性能（FCP/LCP）、渲染性能、资源加载耗时及自定义性能标记。
+- **📡 弱网离线缓存**：断网或发送失败时自动缓存事件到本地 Storage，网络恢复后静默重试；缓存受数量、大小和保留时间限制。
+- **⚡ 性能监控**：采集平台实际提供的导航、渲染、资源加载耗时及自定义性能标记，不伪造浏览器 Web Vitals。
 - **🔗 分布式追踪**：自动注入 `sentry-trace` / `baggage` 头，并将 API 请求耗时上报为 `http.client` span，串联小程序与后端调用链。
 - **📊 Session 健康监控** 与 **📶 网络状态监控**：会话生命周期管理 + 实时网络变化追踪（WiFi/4G/离线）。
 - **🛡️ 智能降噪**：内置错误去重与采样率控制，避免日志风暴。

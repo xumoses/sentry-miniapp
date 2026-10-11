@@ -198,7 +198,10 @@ export class Dedupe implements Integration {
 
     // Otherwise, compare the fingerprints
     try {
-      return !!(currentFingerprint.join('') === previousFingerprint.join(''));
+      return (
+        currentFingerprint.length === previousFingerprint.length &&
+        currentFingerprint.every((value, index) => value === previousFingerprint[index])
+      );
     } catch (_oO) {
       return false;
     }

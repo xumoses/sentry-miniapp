@@ -16,3 +16,5 @@ export { SessionIntegration } from './session';
 export { NetworkStatusIntegration } from './networkstatus';
 export { MinigameIntegration, minigameIntegration } from './minigame';
 export { MinigameFrameRateIntegration, minigameFrameRateIntegration } from './minigame-framerate';
+
+export { PageTracing, pageTracingIntegration } from './pagetracing';

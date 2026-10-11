@@ -4,12 +4,15 @@
 [![npm downloads/month](https://img.shields.io/npm/dm/%40xumoses%2Fsentry-miniapp)](https://www.npmjs.com/package/@xumoses/sentry-miniapp)
 [![github forks](https://img.shields.io/github/forks/lizhiyao/sentry-miniapp?style=social)](https://github.com/lizhiyao/sentry-miniapp/network/members)
 [![github stars](https://img.shields.io/github/stars/lizhiyao/sentry-miniapp?style=social)](https://github.com/lizhiyao/sentry-miniapp/stargazers)
-![test coverage](https://img.shields.io/badge/test%20coverage-100%25-brightgreen.svg)
 [![Sentry Community SDK](https://img.shields.io/badge/Sentry-Community%20SDK-362d59?logo=sentry)](https://docs.sentry.io/platforms/#sdks-supported-by-our-community)
 [![license](https://img.shields.io/github/license/lizhiyao/sentry-miniapp)](./LICENSE)
 [![docs](https://img.shields.io/badge/docs-sentry--miniapp.pages.dev-3eaf7c?logo=readthedocs&logoColor=white)](https://sentry-miniapp.pages.dev/)
 
 [简体中文](./README.md) | English
+
+The pinned `@sentry/core@10.66.0` pipeline supports scopes/initialScope, Page and HTTP tracing, manual logs/metrics, feedback/attachments, sampling and transport controls. See the [capability matrix and platform boundaries](./docs/official-sdk-alignment.md). Enable `tracesSampleRate` or `tracesSampler` for tracing and use anchored `tracePropagationTargets` for trusted origins; an empty array disables propagation. `enablePageTracing:false` disables native Page/Taro lifecycle spans. `enableLogs:true` enables explicit `Sentry.logger` calls; `Sentry.metrics` supports count/gauge/distribution. Neither captures console output automatically.
+
+`defaultIntegrations:false` removes all defaults; an `integrations` callback receives the full platform defaults. Keep `sendDefaultPii:false` and request bodies disabled unless required. App hide performs a best-effort flush. `close()` removes owned instrumentation and stops future offline retries, retaining queued envelopes for a later launch. Local tests do not replace on-device or Sentry server acceptance.
 
 A **mini program monitoring SDK** built on `@sentry/core`, providing **error monitoring**, **performance monitoring**, offline caching, and distributed tracing. Supports WeChat, Alipay, ByteDance, Baidu, QQ, DingTalk, Kuaishou mini programs, **WeChat / Douyin mini games**, and cross-platform frameworks (Taro / uni-app).
 
@@ -41,14 +44,14 @@ See [CHANGELOG.md](./CHANGELOG.md) for full details.
 
 ## ✨ Core Features
 
-- **🚀 Modern Architecture**: Built on the latest Sentry JavaScript V10 SDK core modules.
+- **🚀 Modern Architecture**: Built on pinned Sentry JavaScript core 10.66.0.
 - **📱 True Multi-Platform Support**: Built-in API abstraction engine — one codebase supports **WeChat, Alipay, ByteDance, Baidu, QQ, DingTalk, and Kuaishou** mini programs.
 - **🎮 Mini Game Support**: Auto-detects mini-game environments — error / network / device monitoring out of the box, plus mini-game-specific **cold-start first-frame timing** and **frame-rate / jank monitoring**.
 - **🎯 Automatic Exception Capture**: No business code intrusion. Hooks into lifecycle error listeners (`onError`, `onUnhandledRejection`, `onPageNotFound`, `onMemoryWarning`).
 - **🍞 Rich Context Breadcrumbs**: Auto-records device info, user tap/touch, network requests (XHR), and page lifecycle.
 - **🗺️ Built-in SourceMap Path Normalization**: Unifies virtual stack paths across platforms; works with sentry-cli for seamless resolution.
 - **📡 Offline Caching for Weak Networks**: Caches events to local storage on failure, silently retries when connectivity returns.
-- **⚡ Deep Performance Monitoring**: Navigation timing (FCP/LCP), render performance, resource loading, and custom marks.
+- **⚡ Performance Monitoring**: Platform-provided navigation/render/resource timing and custom marks; no synthetic browser Web Vitals.
 - **🔗 Distributed Tracing**: Injects `sentry-trace` / `baggage` headers and reports API timing as `http.client` spans, connecting mini program and backend call chains.
 - **📊 Session Health** & **📶 Network Status Monitoring**: Session lifecycle management + real-time network change tracking (WiFi/4G/offline).
 - **🛡️ Smart Deduplication & Filtering**: Built-in dedup and sample rate controls to prevent log storms.

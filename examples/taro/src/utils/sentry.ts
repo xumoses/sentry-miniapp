@@ -9,7 +9,7 @@ import * as Sentry from '@xumoses/sentry-miniapp';
 
 // 与 examples/wxapp、examples/uniapp 共用同一个演示 Sentry 项目 DSN，开箱即可上报。
 // 换成你自己项目的 DSN 后，即可在你的后台观察数据。
-const DSN = 'https://47703e01ba4344b8b252c15e8fd980fd@o113510.ingest.us.sentry.io/1528228';
+const DSN = 'https://public@example.com/1';
 
 Sentry.init({
   dsn: DSN,

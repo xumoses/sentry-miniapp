@@ -19,6 +19,7 @@ const mockSetHttpStatus = jest.fn((span, statusCode) => {
 // Mock the core module to avoid redefine property errors
 jest.mock('@sentry/core', () => {
   return {
+    withActiveSpan: (_span: unknown, callback: () => unknown) => callback(),
     addBreadcrumb: jest.fn(),
     getClient: jest.fn(() => ({
       getOptions: () => ({ dsn: 'https://key@sentry.io/123' }),
@@ -116,7 +117,7 @@ describe('NetworkBreadcrumbs Integration', () => {
       expect.objectContaining({
         name: 'GET https://api.example.com/users',
         attributes: expect.objectContaining({
-          'url.full': 'https://api.example.com/users?token=secret#profile',
+          'url.full': 'https://api.example.com/users',
         }),
       }),
     );

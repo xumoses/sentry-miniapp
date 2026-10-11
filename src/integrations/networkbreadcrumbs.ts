@@ -6,6 +6,7 @@ import {
   getTraceData,
   setHttpStatus,
   startInactiveSpan,
+  withActiveSpan,
 } from '@sentry/core';
 import type { Integration, Span } from '@sentry/core';
 import { fill } from '../helpers';
@@ -32,7 +33,7 @@ export class NetworkBreadcrumbs implements Integration {
   private readonly _sensitiveKeys: string[];
   private readonly _denyUrls: RegExp[];
   private readonly _enableTracePropagation: boolean;
-  private readonly _tracePropagationTargets: Array<string | RegExp>;
+  private readonly _tracePropagationTargets: Array<string | RegExp> | undefined;
   private _originalRequest: Function | null = null;
   private _originalHttpRequest: Function | null = null;
 
@@ -73,7 +74,7 @@ export class NetworkBreadcrumbs implements Integration {
       typeof pattern === 'string' ? new RegExp(pattern) : pattern,
     );
     this._enableTracePropagation = options.enableTracePropagation !== false;
-    this._tracePropagationTargets = options.tracePropagationTargets || [];
+    this._tracePropagationTargets = options.tracePropagationTargets;
   }
 
   /**
@@ -127,6 +128,8 @@ export class NetworkBreadcrumbs implements Integration {
         return originalRequest.call(this, options);
       }
 
+      // Do not mutate the caller's request options or callbacks.
+      options = { ...options };
       const url = normalizeUrl(options.url);
 
       // Get the configured DSN/Transport URL from the current client
@@ -149,7 +152,9 @@ export class NetworkBreadcrumbs implements Integration {
       // Ignore Sentry's own requests to prevent infinite loops
       const hostMatch = url.match(/^https?:\/\/([^:/\n]+)/i);
       const requestHost = hostMatch && hostMatch[1] ? hostMatch[1] : '';
+      const tunnel = client?.getOptions().tunnel;
       const isSentryRequest =
+        (typeof tunnel === 'string' && url.replace(/\/$/, '') === tunnel.replace(/\/$/, '')) ||
         (dsnUrl && requestHost === dsnUrl) ||
         requestHost === 'sentry.io' ||
         requestHost.endsWith('.sentry.io');
@@ -174,7 +179,7 @@ export class NetworkBreadcrumbs implements Integration {
       }
 
       const breadcrumbData: Record<string, any> = {
-        url,
+        url: sanitizeSpanNameUrl(url),
         method,
       };
 
@@ -229,7 +234,7 @@ export class NetworkBreadcrumbs implements Integration {
         });
 
         if (typeof originalSuccess === 'function') {
-          return originalSuccess.apply(this, args);
+          return withActiveSpan(requestSpan, () => originalSuccess.apply(this, args));
         }
       };
 
@@ -253,7 +258,7 @@ export class NetworkBreadcrumbs implements Integration {
         });
 
         if (typeof originalFail === 'function') {
-          return originalFail.apply(this, args);
+          return withActiveSpan(requestSpan, () => originalFail.apply(this, args));
         }
       };
 
@@ -266,7 +271,7 @@ export class NetworkBreadcrumbs implements Integration {
         });
 
         if (typeof originalComplete === 'function') {
-          return originalComplete.apply(this, args);
+          return withActiveSpan(requestSpan, () => originalComplete.apply(this, args));
         }
       };
 
@@ -286,8 +291,8 @@ export class NetworkBreadcrumbs implements Integration {
    * 判断是否应该对该 URL 注入追踪头
    */
   private _shouldPropagateTrace(url: string): boolean {
-    if (this._tracePropagationTargets.length === 0) {
-      return true; // 无白名单则全部注入
+    if (this._tracePropagationTargets === undefined) {
+      return true; // Preserve the legacy unspecified default; explicit [] disables propagation.
     }
     return this._tracePropagationTargets.some((target) => {
       if (typeof target === 'string') {
@@ -304,7 +309,12 @@ export class NetworkBreadcrumbs implements Integration {
    * 检查 URL 是否在拒绝记录请求体的列表中
    */
   private _shouldDenyBodyUrl(url: string): boolean {
-    return this._denyUrls.some((pattern) => pattern.test(url));
+    return this._denyUrls.some((pattern) => {
+      pattern.lastIndex = 0;
+      const matches = pattern.test(url);
+      pattern.lastIndex = 0;
+      return matches;
+    });
   }
 
   /**
@@ -358,7 +368,7 @@ function startRequestSpan(method: string, url: string): Span | null {
       kind: 2,
       attributes: {
         'http.request.method': method,
-        'url.full': url,
+        'url.full': sanitizeSpanNameUrl(url),
         'server.address': serverAddress || undefined,
       },
     });
@@ -410,12 +420,15 @@ function injectTraceHeaders(options: any, span: Span | null): void {
       ...(isRecord(options.headers) ? options.headers : {}),
       ...(isRecord(options.header) ? options.header : {}),
     };
-    if (!header['sentry-trace']) {
+    const traceKey = Object.keys(header).find((key) => key.toLowerCase() === 'sentry-trace');
+    const baggageKey =
+      Object.keys(header).find((key) => key.toLowerCase() === 'baggage') || 'baggage';
+    if (!traceKey) {
       header['sentry-trace'] = sentryTrace;
     }
 
     if (traceData.baggage) {
-      header['baggage'] = mergeBaggageHeader(header['baggage'], traceData.baggage);
+      header[baggageKey] = mergeBaggageHeader(header[baggageKey], traceData.baggage);
     }
 
     // 支持微信用 header、支付宝用 headers

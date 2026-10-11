@@ -1,4 +1,4 @@
-import { captureException, withScope } from '@sentry/core';
+import { captureException, withScope, getClient } from '@sentry/core';
 import type { WrappedFunction } from '@sentry/core';
 
 /**
@@ -55,7 +55,7 @@ export function wrap(
           ...event,
           extra: {
             ...event.extra,
-            arguments: args,
+            ...(getClient()?.getOptions().sendDefaultPii === true ? { arguments: args } : {}),
           },
         }));
 

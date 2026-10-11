@@ -28,27 +28,39 @@ export function createMiniappTransport(options: MiniappTransportOptions): Transp
       const requestOptions = {
         url: transportUrl,
         method: 'POST' as const,
-        data: request.body,
+        data:
+          typeof request.body === 'string'
+            ? request.body
+            : request.body.buffer.slice(
+                request.body.byteOffset,
+                request.body.byteOffset + request.body.byteLength,
+              ),
         header: {
           'Content-Type': SENTRY_ENVELOPE_CONTENT_TYPE,
+          ...options.headers,
           ...request.headers,
         },
         // Alipay uses `headers` instead of `header`
         headers: {
           'Content-Type': SENTRY_ENVELOPE_CONTENT_TYPE,
+          ...options.headers,
           ...request.headers,
         },
         timeout: 10000,
         success: (res: any) => {
           // Alipay uses `status` instead of `statusCode`, and `headers` instead of `header`
           const status = res.statusCode || res.status;
-          const resHeaders = res.header || res.headers || {};
+          const rawHeaders = res.header || res.headers || {};
+          const resHeaders = Object.fromEntries(
+            Object.entries(rawHeaders).map(([key, value]) => [key.toLowerCase(), value]),
+          );
 
           resolve({
             statusCode: status,
             headers: {
-              'x-sentry-rate-limits': resHeaders['x-sentry-rate-limits'],
-              'retry-after': resHeaders['retry-after'],
+              'x-sentry-rate-limits':
+                (resHeaders['x-sentry-rate-limits'] as string | undefined) ?? null,
+              'retry-after': (resHeaders['retry-after'] as string | undefined) ?? null,
             },
           });
         },

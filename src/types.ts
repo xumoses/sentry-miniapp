@@ -6,6 +6,7 @@ import type {
   Integration,
   Transport,
   Breadcrumb,
+  Options,
 } from '@sentry/core';
 
 /**
@@ -50,7 +51,15 @@ export interface MinigameFrameRateOptions {
 /**
  * Configuration options for the Sentry Miniapp SDK.
  */
-export interface MiniappOptions {
+export interface MiniappOptions extends Omit<
+  Options,
+  | 'integrations'
+  | 'defaultIntegrations'
+  | 'tracesSampler'
+  | 'beforeSend'
+  | 'beforeBreadcrumb'
+  | 'transport'
+> {
   /** Sentry DSN */
   dsn?: string;
 
@@ -142,6 +151,9 @@ export interface MiniappOptions {
   /** Whether to enable page lifecycle breadcrumbs */
   enableNavigationBreadcrumbs?: boolean;
 
+  /** Native/Taro Page load and resume idle spans; enabled when tracing is configured. No Page API means no-op. */
+  enablePageTracing?: boolean;
+
   /** Whether to enable automatic source map path rewrite */
   enableSourceMap?: boolean;
 
@@ -189,7 +201,7 @@ export interface MiniappOptions {
   /** 是否启用分布式追踪头注入（默认 true）。只控制 sentry-trace/baggage 传播，不关闭本地 API 请求 span。 */
   enableTracePropagation?: boolean;
 
-  /** 追踪目标 URL 白名单，仅匹配的请求才注入 sentry-trace/baggage 头。为空则对所有非 Sentry 请求注入；API 请求 span 仍按 tracing 采样记录 */
+  /** 追踪目标 URL 白名单，仅匹配的请求才注入 sentry-trace/baggage 头。未配置则兼容原行为；显式 [] 禁止传播。建议使用锚定正则精确匹配可信域名；API span 仍按采样记录 */
   tracePropagationTargets?: Array<string | RegExp>;
 
   /** 是否启用自动 Session 管理（默认 true），为 Sentry Release Health 提供会话数据 */
@@ -221,10 +233,10 @@ export interface MiniappOptions {
   ignoreErrors?: Array<string | RegExp>;
 
   /** Integrations */
-  integrations?: Integration[];
+  integrations?: Integration[] | ((defaults: Integration[]) => Integration[]);
 
   /** Default integrations */
-  defaultIntegrations?: Integration[];
+  defaultIntegrations?: false | Integration[];
 }
 
 /**

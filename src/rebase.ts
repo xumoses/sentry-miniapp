@@ -6,6 +6,7 @@ interface ReplayEventLike {
 }
 interface ReplayNode {
   id: number;
+  type?: number;
   childNodes?: ReplayNode[];
   attributes?: Record<string, unknown>;
   textContent?: string;
@@ -20,7 +21,7 @@ function rows(value: unknown): Record<string, unknown>[] {
   return Array.isArray(value) ? value.filter(record) : [];
 }
 
-/** Clones lazily once and applies only the DOM/scroll events understood by the recorder. */
+/** Clones lazily once and folds the DOM, input and scroll increments recorded by the SDK. */
 export function createCheckpointRebaser<TEvent extends ReplayEventLike>(
   initial: TEvent,
 ): {
@@ -59,16 +60,28 @@ export function createCheckpointRebaser<TEvent extends ReplayEventLike>(
   };
   return {
     apply(event): void {
-      if (
-        event.type !== 3 ||
-        (event.data['source'] !== 0 && event.data['source'] !== 3) ||
-        !initialize()
-      )
+      if (event.type !== 3 || ![0, 3, 5].includes(event.data['source'] as number) || !initialize())
         return;
       let changed = false;
       if (event.data['source'] === 3) {
+        if (root?.type === 0 && event.data['id'] === root.id) {
+          const offset = record(snapshot.data['initialOffset'])
+            ? snapshot.data['initialOffset']
+            : {};
+          snapshot.data['initialOffset'] = offset;
+          for (const [coordinate, name] of [
+            ['x', 'left'],
+            ['y', 'top'],
+          ]) {
+            const value = event.data[coordinate!];
+            if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+              offset[name!] = value;
+              changed = true;
+            }
+          }
+        }
         const target = nodes.get(event.data['id'] as number);
-        if (target)
+        if (target && target.type !== 0)
           for (const [coordinate, name] of [
             ['x', 'rr_scrollLeft'],
             ['y', 'rr_scrollTop'],
@@ -79,6 +92,16 @@ export function createCheckpointRebaser<TEvent extends ReplayEventLike>(
               changed = true;
             }
           }
+      } else if (event.data['source'] === 5) {
+        const target = nodes.get(event.data['id'] as number);
+        if (target && typeof event.data['text'] === 'string') {
+          setAttribute(target, 'value', event.data['text']);
+          changed = true;
+        }
+        if (target && typeof event.data['isChecked'] === 'boolean') {
+          setAttribute(target, 'checked', event.data['isChecked'] ? true : null);
+          changed = true;
+        }
       } else {
         for (const remove of rows(event.data['removes'])) {
           const parent = nodes.get(remove['parentId'] as number);

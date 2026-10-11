@@ -5,10 +5,10 @@ describe('miniappStackParser', () => {
   describe('V8 style stack traces', () => {
     it('preserves DevTools bundle URLs and caller order', () => {
       const bundle =
-        'http://127.0.0.1:47848/appservice/getsubpackagebundle_taroMiniapp%2Fpages%2FOption4Fund%2F.js?t=wechat&s=&v=fixture';
+        'http://127.0.0.1:47848/appservice/getsubpackagebundle_taroMiniapp%2Fpages%2FDetails%2F.js?t=wechat&s=&v=fixture';
       const stack = [
         'Error: source probe',
-        `    at r.__validateOptionSource (${bundle}:2140:19)`,
+        `    at r.__validateSource (${bundle}:2140:19)`,
         '    at <anonymous>:1:68',
       ].join('\n');
 
@@ -16,7 +16,7 @@ describe('miniappStackParser', () => {
         { filename: '<anonymous>', function: '?', in_app: true, lineno: 1, colno: 68 },
         {
           filename: bundle,
-          function: 'r.__validateOptionSource',
+          function: 'r.__validateSource',
           in_app: true,
           lineno: 2140,
           colno: 19,
@@ -97,8 +97,8 @@ describe('miniappStackParser', () => {
   describe('Safari/JavaScriptCore style stack traces', () => {
     it.each([
       {
-        stack: 'handleTap@http://127.0.0.1:47848/appservice/getsubpackagebundle_taroMiniapp%2Fpages%2FSwap%2F.js?t=wechat&s=&v=fixture:6535:19',
-        filename: 'http://127.0.0.1:47848/appservice/getsubpackagebundle_taroMiniapp%2Fpages%2FSwap%2F.js?t=wechat&s=&v=fixture',
+        stack: 'handleTap@http://127.0.0.1:47848/appservice/getsubpackagebundle_taroMiniapp%2Fpages%2FCatalog%2F.js?t=wechat&s=&v=fixture:6535:19',
+        filename: 'http://127.0.0.1:47848/appservice/getsubpackagebundle_taroMiniapp%2Fpages%2FCatalog%2F.js?t=wechat&s=&v=fixture',
         functionName: 'handleTap', lineno: 6535, colno: 19,
       },
       {

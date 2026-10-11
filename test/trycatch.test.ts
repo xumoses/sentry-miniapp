@@ -3,6 +3,7 @@ import { TryCatch } from '../src/integrations/trycatch';
 
 // Mock @sentry/core
 jest.mock('@sentry/core', () => ({
+  getActiveSpan: jest.fn(),
   captureException: jest.fn(),
   getCurrentScope: jest.fn(() => ({
     addEventProcessor: jest.fn(),

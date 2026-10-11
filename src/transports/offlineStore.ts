@@ -11,6 +11,7 @@ const DEFAULT_MAX_STORE_BYTES = 900 * 1024;
 interface CachedEnvelope {
   envelope: Envelope;
   timestamp: number;
+  binaryPayloads?: number[];
 }
 
 /** 因超限 / 过期丢弃事件的原因。 */
@@ -25,6 +26,8 @@ export type EvictionMode = 'error-priority' | 'preserve-oldest';
 
 export interface MiniappOfflineStoreOptions extends OfflineTransportOptions {
   offlineCacheLimit?: number;
+  /** Isolate projects/clients; omitted only for legacy direct store callers. */
+  storageKey?: string;
   /** 离线缓存过期时间（ms），默认 86400000 (24h) */
   offlineCacheMaxAge?: number;
   /** 单 key 字节上限（默认约 900KB，受平台 Storage 限制） */
@@ -41,11 +44,16 @@ export interface MiniappOfflineStoreOptions extends OfflineTransportOptions {
  */
 export function createMiniappOfflineStore(options: MiniappOfflineStoreOptions): OfflineStore {
   // 用 ?? 而非 ||：尊重显式的 0（|| 会把 0 当成未设置而回退默认值）。
-  const maxCacheSize = options.offlineCacheLimit ?? DEFAULT_OFFLINE_CACHE_SIZE;
-  const maxAge = options.offlineCacheMaxAge ?? DEFAULT_MAX_AGE;
-  const maxBytes = options.maxBytes ?? DEFAULT_MAX_STORE_BYTES;
+  const maxCacheSize = boundedLimit(options.offlineCacheLimit, DEFAULT_OFFLINE_CACHE_SIZE);
+  const storageKey = options.storageKey || OFFLINE_STORE_KEY;
+  const maxAge = boundedLimit(options.offlineCacheMaxAge, DEFAULT_MAX_AGE);
+  const maxBytes = Math.min(
+    DEFAULT_MAX_STORE_BYTES,
+    boundedLimit(options.maxBytes, DEFAULT_MAX_STORE_BYTES),
+  );
   const evictionMode = options.evictionMode ?? 'error-priority';
   const onDrop = options.onDrop;
+  const originalTimestamps = new WeakMap<Envelope, number>();
 
   function report(reason: DropReason, dropped: number): void {
     if (dropped > 0 && typeof onDrop === 'function') {
@@ -102,7 +110,7 @@ export function createMiniappOfflineStore(options: MiniappOfflineStoreOptions): 
       return;
     }
     let working = store;
-    let serialized = JSON.stringify(working);
+    let serialized = serializeStore(working);
     let dropped = 0;
     while (working.length > 0 && utf8ByteLength(serialized) > maxBytes) {
       if (evictionMode === 'preserve-oldest') {
@@ -113,11 +121,11 @@ export function createMiniappOfflineStore(options: MiniappOfflineStoreOptions): 
         working = working.slice(0, dropIdx).concat(working.slice(dropIdx + 1));
       }
       dropped++;
-      serialized = JSON.stringify(working);
+      serialized = serializeStore(working);
     }
     report('bytes', dropped);
     try {
-      storageApi(OFFLINE_STORE_KEY, serialized);
+      storageApi(storageKey, serialized);
     } catch (_e) {
       // ignore（已尽力压到上限内；极端单条仍超限则吞掉，不阻断主流程）
     }
@@ -126,7 +134,7 @@ export function createMiniappOfflineStore(options: MiniappOfflineStoreOptions): 
   return {
     push: async (env: Envelope): Promise<void> => {
       try {
-        const store = evictExpired(getStore());
+        const store = evictExpired(getStore(storageKey));
         store.push({ envelope: env, timestamp: Date.now() });
         report('count', evictByCount(store, 'push'));
         persist(store);
@@ -136,8 +144,9 @@ export function createMiniappOfflineStore(options: MiniappOfflineStoreOptions): 
     },
     unshift: async (env: Envelope): Promise<void> => {
       try {
-        const store = evictExpired(getStore());
-        store.unshift({ envelope: env, timestamp: Date.now() });
+        const store = evictExpired(getStore(storageKey));
+        // A failed retry must not restart the retention period indefinitely.
+        store.unshift({ envelope: env, timestamp: originalTimestamps.get(env) ?? Date.now() });
         report('count', evictByCount(store, 'unshift'));
         persist(store);
       } catch (e) {
@@ -146,7 +155,7 @@ export function createMiniappOfflineStore(options: MiniappOfflineStoreOptions): 
     },
     shift: async (): Promise<Envelope | undefined> => {
       try {
-        const before = getStore();
+        const before = getStore(storageKey);
         const store = evictExpired(before);
         if (store.length === 0) {
           if (before.length > 0) {
@@ -155,6 +164,7 @@ export function createMiniappOfflineStore(options: MiniappOfflineStoreOptions): 
           return undefined;
         }
         const item = store.shift();
+        if (item) originalTimestamps.set(item.envelope, item.timestamp);
         persist(store);
         return item?.envelope;
       } catch (e) {
@@ -190,14 +200,14 @@ function findLastIndex<T>(arr: T[], predicate: (item: T) => boolean): number {
   return -1;
 }
 
-function getStore(): CachedEnvelope[] {
+function getStore(storageKey: string): CachedEnvelope[] {
   const storageApi = sdk().getStorageSync;
   if (!storageApi) {
     return [];
   }
   let storedStr: any;
   try {
-    storedStr = storageApi(OFFLINE_STORE_KEY);
+    storedStr = storageApi(storageKey);
   } catch (_e) {
     return [];
   }
@@ -209,7 +219,7 @@ function getStore(): CachedEnvelope[] {
     // 兼容旧版本格式（直接存储 Envelope[]）
     if (Array.isArray(parsed) && parsed.length > 0) {
       if (parsed[0] && 'envelope' in parsed[0] && 'timestamp' in parsed[0]) {
-        return parsed;
+        return parsed.map(restoreBinaryPayloads);
       }
       // 旧格式：直接是 Envelope 数组，迁移为新格式
       return parsed.map((env: Envelope) => ({
@@ -221,16 +231,16 @@ function getStore(): CachedEnvelope[] {
   } catch (_e) {
     // 解析失败 = 存储被写坏（部分写入 / 配额截断等）。主动清键自愈，避免坏数据常驻、
     // 让后续 flush 永远读到空，且坏 blob 一直占着这个 key 的空间。
-    removeStore();
+    removeStore(storageKey);
     return [];
   }
 }
 
-function removeStore(): void {
+function removeStore(storageKey: string): void {
   try {
     const removeApi = sdk().removeStorageSync;
     if (removeApi) {
-      removeApi(OFFLINE_STORE_KEY);
+      removeApi(storageKey);
     }
   } catch (_e) {
     // ignore
@@ -255,4 +265,35 @@ function utf8ByteLength(str: string): number {
     }
   }
   return bytes;
+}
+
+function boundedLimit(value: number | undefined, fallback: number): number {
+  return value === undefined || !Number.isFinite(value) ? fallback : Math.max(0, Math.floor(value));
+}
+
+function serializeStore(store: CachedEnvelope[]): string {
+  return JSON.stringify(
+    store.map((cached) => {
+      const binaryPayloads: number[] = [];
+      const items = cached.envelope[1].map((item, index) => {
+        if (!(item[1] instanceof Uint8Array)) return item;
+        binaryPayloads.push(index);
+        return [item[0], Array.from(item[1])];
+      });
+      return {
+        ...cached,
+        envelope: [cached.envelope[0], items],
+        ...(binaryPayloads.length ? { binaryPayloads } : {}),
+      };
+    }),
+  );
+}
+
+function restoreBinaryPayloads(cached: CachedEnvelope): CachedEnvelope {
+  if (!cached.binaryPayloads?.length) return cached;
+  const binaryPayloads = new Set(cached.binaryPayloads);
+  const items = cached.envelope[1].map((item, index) =>
+    binaryPayloads.has(index) && Array.isArray(item[1]) ? [item[0], new Uint8Array(item[1])] : item,
+  );
+  return { timestamp: cached.timestamp, envelope: [cached.envelope[0], items] as Envelope };
 }

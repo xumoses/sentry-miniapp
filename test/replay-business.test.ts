@@ -90,6 +90,7 @@ describe('Taro business component replay semantics', () => {
       disabled,
     ]);
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root: element('root', {}, [clipped]),
       MutationObserver: observer.MutationObserver,
     });
@@ -111,13 +112,17 @@ describe('Taro business component replay semantics', () => {
   it('checkpoints inserted or removed Portal subtrees without orphaning detached nodes', () => {
     const observer = harness();
     const root = element('root');
-    const controller = startTaroDomReplayPoc({ root, MutationObserver: observer.MutationObserver });
+    const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
+      root,
+      MutationObserver: observer.MutationObserver,
+    });
     const portal = element('root-portal', { 'data-fixture': 'portal' });
     const wrapper = element('view', { 'data-fixture': 'wrapper' }, [portal]);
     root.childNodes?.push(wrapper);
     wrapper.parentNode = root;
     observer.emit([{ type: 'childList', target: root, addedNodes: [wrapper] }]);
-    expect(body(snapshot(controller))?.childNodes).toContain(
+    expect(body(snapshot(controller))?.childNodes).toContainEqual(
       marked(snapshot(controller), 'portal'),
     );
     root.childNodes = [];
@@ -135,6 +140,7 @@ describe('Taro business component replay semantics', () => {
       src: 'data:image/png;base64,cHJpdmF0ZQ==',
     });
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root: element('root', {}, [image, dynamic]),
       MutationObserver: observer.MutationObserver,
       staticImageSources: {
@@ -166,6 +172,7 @@ describe('Taro business component replay semantics', () => {
     const charsetSvg = 'data:image/svg+xml;charset=utf-8;base64,PHN2Zy8+';
     const image = element('image', { 'data-fixture': 'svg', src: '/assets/icon.svg' });
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root: element('root', {}, [image]),
       MutationObserver: observer.MutationObserver,
       staticImageSources: { '/assets/icon.svg': svg, [charsetSvg]: charsetSvg },
@@ -181,11 +188,14 @@ describe('Taro business component replay semantics', () => {
 
   it('preserves audited percent-encoded SVGs with and without a UTF-8 charset', () => {
     const observer = harness();
-    const payload = encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg"><path fill="#fff" d="M0 0h1v1z"/></svg>');
+    const payload = encodeURIComponent(
+      '<svg xmlns="http://www.w3.org/2000/svg"><path fill="#fff" d="M0 0h1v1z"/></svg>',
+    );
     const svg = `data:image/svg+xml,${payload}`;
     const charsetSvg = `data:image/svg+xml;charset=utf-8,${payload}`;
     const image = element('image', { 'data-fixture': 'svg', src: svg });
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root: element('root', {}, [image]),
       MutationObserver: observer.MutationObserver,
       staticImageSources: { [svg]: svg, '/assets/icon.svg': charsetSvg },
@@ -209,6 +219,7 @@ describe('Taro business component replay semantics', () => {
     const image = element('image', { 'data-fixture': 'image', src: runtimeBase64 });
     const view = element('view', { 'data-fixture': 'view', src: trusted });
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root: element('root', {}, [image, view]),
       MutationObserver: observer.MutationObserver,
       maskAllText: false,
@@ -246,45 +257,44 @@ describe('Taro business component replay semantics', () => {
     ['scheme-tab', 'da\tta:'],
     ['scheme-newline', 'da\nta:'],
     ['scheme-carriage-return', 'da\rta:'],
-  ])(
-    'filters unlisted SVG payloads accepted as browser data URLs: %s',
-    (_name, scheme) => {
-      const observer = harness();
-      const canary = 'synthetic-private-mixed-case-svg-4472';
-      const xml = `<svg><text>${canary}</text></svg>`;
-      const percent = `${scheme}image/svg+xml,${encodeURIComponent(xml)}`;
-      const base64 = `${scheme}image/svg+xml;base64,${Buffer.from(xml).toString('base64')}`;
-      expect(new URL(percent).protocol).toBe('data:');
-      expect(new URL(base64).protocol).toBe('data:');
-      const trusted = 'data:image/svg+xml;base64,PHN2Zy8+';
-      const dynamic = element('image', { 'data-fixture': 'dynamic', src: percent });
-      const mutable = element('image', { 'data-fixture': 'mutable', src: '/assets/icon.svg' });
-      const controller = startTaroDomReplayPoc({
-        root: element('root', {}, [dynamic, mutable]),
-        MutationObserver: observer.MutationObserver,
-        staticImageSources: { '/assets/icon.svg': trusted },
-      });
-      const initial = snapshot(controller);
-      mutable.props['src'] = base64;
-      observer.emit([{ type: 'attributes', target: mutable, attributeName: 'src' }]);
-      const mutation = controller.getCapture().events.at(-1)?.data['attributes'];
-      const captured = JSON.stringify(controller.getCapture());
-      controller.stop();
-      expect(marked(initial, 'dynamic')?.attributes?.['src']).toBe('data:image/svg+xml');
-      expect(mutation).toEqual([
-        { id: marked(initial, 'mutable')?.id, attributes: { src: 'data:image/svg+xml' } },
-      ]);
-      expect(captured.includes(canary)).toBe(false);
-      expect(captured.includes(percent)).toBe(false);
-      expect(captured.includes(base64)).toBe(false);
-    },
-  );
+  ])('filters unlisted SVG payloads accepted as browser data URLs: %s', (_name, scheme) => {
+    const observer = harness();
+    const canary = 'synthetic-private-mixed-case-svg-4472';
+    const xml = `<svg><text>${canary}</text></svg>`;
+    const percent = `${scheme}image/svg+xml,${encodeURIComponent(xml)}`;
+    const base64 = `${scheme}image/svg+xml;base64,${Buffer.from(xml).toString('base64')}`;
+    expect(new URL(percent).protocol).toBe('data:');
+    expect(new URL(base64).protocol).toBe('data:');
+    const trusted = 'data:image/svg+xml;base64,PHN2Zy8+';
+    const dynamic = element('image', { 'data-fixture': 'dynamic', src: percent });
+    const mutable = element('image', { 'data-fixture': 'mutable', src: '/assets/icon.svg' });
+    const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
+      root: element('root', {}, [dynamic, mutable]),
+      MutationObserver: observer.MutationObserver,
+      staticImageSources: { '/assets/icon.svg': trusted },
+    });
+    const initial = snapshot(controller);
+    mutable.props['src'] = base64;
+    observer.emit([{ type: 'attributes', target: mutable, attributeName: 'src' }]);
+    const mutation = controller.getCapture().events.at(-1)?.data['attributes'];
+    const captured = JSON.stringify(controller.getCapture());
+    controller.stop();
+    expect(marked(initial, 'dynamic')?.attributes?.['src']).toBe('data:image/svg+xml');
+    expect(mutation).toEqual([
+      { id: marked(initial, 'mutable')?.id, attributes: { src: 'data:image/svg+xml' } },
+    ]);
+    expect(captured.includes(canary)).toBe(false);
+    expect(captured.includes(percent)).toBe(false);
+    expect(captured.includes(base64)).toBe(false);
+  });
 
-  it('keeps whitelist keys exact and leaves non-data URL content unchanged', () => {
+  it('keeps whitelist keys exact while normalizing browser-ignored URL characters', () => {
     const observer = harness();
     const trusted = 'data:image/svg+xml;base64,PHN2Zy8+';
     const ordinary = ' \thttps://example.test/static/icon\n.svg';
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root: element('root', {}, [
         element('image', { 'data-fixture': 'exact', src: trusted }),
         element('image', { 'data-fixture': 'variant', src: `\t${trusted}` }),
@@ -297,7 +307,9 @@ describe('Taro business component replay semantics', () => {
     controller.stop();
     expect(marked(initial, 'exact')?.attributes?.['src']).toBe(trusted);
     expect(marked(initial, 'variant')?.attributes?.['src']).toBe('data:image/svg+xml');
-    expect(marked(initial, 'ordinary')?.attributes?.['src']).toBe(ordinary);
+    expect(marked(initial, 'ordinary')?.attributes?.['src']).toBe(
+      'https://example.test/static/icon.svg',
+    );
   });
 
   it.each([
@@ -314,6 +326,7 @@ describe('Taro business component replay semantics', () => {
     const observer = harness();
     const image = element('image', { 'data-fixture': 'image', src: '/assets/icon.svg' });
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root: element('root', {}, [image]),
       MutationObserver: observer.MutationObserver,
       staticImageSources: { '/assets/icon.svg': value },
@@ -334,9 +347,12 @@ describe('Taro business component replay semantics', () => {
     const record = (count: number) => {
       const observer = harness();
       const controller = startTaroDomReplayPoc({
-        root: element('root', {}, Array.from({ length: count }, () =>
-          element('image', { src: '/assets/icon.svg' }),
-        )),
+        blockAllMedia: false,
+        root: element(
+          'root',
+          {},
+          Array.from({ length: count }, () => element('image', { src: '/assets/icon.svg' })),
+        ),
         MutationObserver: observer.MutationObserver,
         staticImageSources,
         maxBytes: 512 * 1024,
@@ -366,6 +382,7 @@ describe('Taro business component replay semantics', () => {
       element('image', { 'data-fixture': src, src }),
     );
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root: element('root', {}, images),
       MutationObserver: observer.MutationObserver,
       staticImageSources: Object.assign(Object.create({ '/prototype': imageData }), {
@@ -392,6 +409,7 @@ describe('Taro business component replay semantics', () => {
       column('right'),
     ]);
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root: element('root', {}, [picker]),
       MutationObserver: observer.MutationObserver,
       width: 375,
@@ -444,7 +462,11 @@ describe('Taro business component replay semantics', () => {
       ),
     });
     const root = element('root', {}, [picker]);
-    const controller = startTaroDomReplayPoc({ root, MutationObserver: observer.MutationObserver });
+    const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
+      root,
+      MutationObserver: observer.MutationObserver,
+    });
     const event = { detail: { value: [1] } };
     listeners.forEach((listener) => listener(event));
     expect(application).toHaveBeenCalledWith(event);
@@ -458,7 +480,11 @@ describe('Taro business component replay semantics', () => {
     expect(controller.getCapture().events).toHaveLength(count);
     controller.stop();
     expect(listeners).toEqual(new Set([application]));
-    const restarted = startTaroDomReplayPoc({ root, MutationObserver: observer.MutationObserver });
+    const restarted = startTaroDomReplayPoc({
+      blockAllMedia: false,
+      root,
+      MutationObserver: observer.MutationObserver,
+    });
     expect(marked(snapshot(restarted), 'column')?.attributes?.['style']).toContain(
       '--taro-replay-picker-selected:1',
     );
@@ -474,6 +500,7 @@ describe('Taro business component replay semantics', () => {
     const rows = Array.from({ length: 12 }, () => element('view'));
     const list = element('view', { 'data-fixture': 'list' }, rows);
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root: element('root', {}, [input, list]),
       MutationObserver: observer.MutationObserver,
       rollingWindowMs: 30000,
@@ -507,9 +534,14 @@ describe('Taro business component replay semantics', () => {
     const observer = harness();
     const input = element('input', { value: '' });
     const root = element('root', {}, [input]);
-    const sizing = startTaroDomReplayPoc({ root, MutationObserver: observer.MutationObserver });
+    const sizing = startTaroDomReplayPoc({
+      blockAllMedia: false,
+      root,
+      MutationObserver: observer.MutationObserver,
+    });
     const maxBytes = sizing.stop().stats.approximateBytes + 64;
     const controller = startTaroDomReplayPoc({
+      blockAllMedia: false,
       root,
       MutationObserver: observer.MutationObserver,
       maskInputValues: false,

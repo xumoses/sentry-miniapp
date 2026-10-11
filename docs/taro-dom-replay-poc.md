@@ -23,6 +23,44 @@ Sentry breadcrumbs into rrweb custom events and network performance spans.
 This is an experimental recorder, not a default SDK integration. Native mini
 programs and mini games still do not expose a browser DOM and are unaffected.
 
+## Official baseline and supported event surfaces
+
+The reference is [Sentry JavaScript 10.66.0 Replay configuration](https://github.com/getsentry/sentry-javascript/blob/10.66.0/packages/replay-internal/src/integration.ts),
+matching this SDK's `@sentry/core` version. The recorder uses the
+[rrweb event schema](https://github.com/rrweb-io/rrweb/blob/main/packages/types/src/index.ts)
+for mutations, Input (source 5), MouseInteraction (source 2), Scroll (source 3),
+ViewportResize (source 4), and TouchMove (source 6). This is a mini-program
+implementation of available surfaces, not an installation of the browser recorder.
+
+When the mounted root offers event listeners, bubbling native `input`/`change`
+events for Input and Textarea are captured even without a MutationObserver update.
+Controlled value updates are also emitted as Input events so an already edited
+playback control receives the new property value. Values share the snapshot masking
+rules; native input observation never writes application props. A weak cache keeps
+the latest observed value on the same mounted node across recorder restart.
+Taps, touch start/end/cancel and focus/blur reference recorded node IDs. Taps add a
+`ui.click` breadcrumb with only the node kind and ID, never its label or input value.
+Touch movement uses actual coordinates at most every 50 ms. Pointer events lacking
+coordinates are omitted; focus/blur need none. Native events stopped before reaching
+the root are not intercepted or re-dispatched. Unsupported listener APIs safely skip
+this layer, while DOM mutation recording remains available.
+
+The lifecycle adapter may call `recordPageScroll({scrollTop, scrollLeft})` from
+Taro `onPageScroll`, and `recordViewport({width, height})` from `onResize`.
+Invalid values and unchanged positions/sizes are ignored. Page scroll uses document
+ID 1 and becomes `initialOffset` in checkpoints and rolling rebases; viewport changes
+update rrweb dimensions and recompute rpx layout. Without those lifecycle inputs the
+recorder cannot infer native window scrolling or orientation changes.
+
+`takeSegment()` drains a session segment while keeping the observer, native listeners,
+node IDs and privacy state attached. The first segment contains Meta + FullSnapshot;
+subsequent segments may contain increments only and must be sent in order with the same
+Replay ID. It does not reset the recorder's duration limit. A stopped recorder returns
+its terminal capture, and a rolling error buffer returns a copy without draining, so
+periodic flush cannot destroy the error-before context. `getCapture`, `takeSegment`
+and `onEvent` expose detached data; modifying it cannot corrupt retained events or
+their cached byte accounting.
+
 ## Host contract
 
 Call the recorder only after Taro has mounted the current page root (for
@@ -62,8 +100,10 @@ stylesheets at runtime. Do not put input values, user data, or runtime URLs in t
 stylesheet: it is trusted code and does not pass through text or attribute masking.
 
 Both this CSS and inline snapshot/mutation styles convert `rpx` lengths with
-`width / 750` (375 px when width is omitted). CSS strings, comments, and asset URLs
-remain intact. Native views keep content-box sizing, so a 44 px navigation view
+`width / 750` (375 px when width is omitted). Trusted build CSS strings, comments,
+and asset URLs remain intact. Runtime inline/control style strings remove comments
+and sanitize URL tokens (including CSS escapes and image-set string URLs); with
+`blockAllMedia` enabled their dynamic URLs are blanked. Native views keep content-box sizing, so a 44 px navigation view
 with 47 px top padding remains 91 px tall. Default buttons use block layout,
 mini-program font/line-height and border styling; inputs, textareas, and vertical
 scroll views have corresponding browser defaults. Caller CSS may override these
@@ -84,6 +124,15 @@ previous compliant event array and statistics rather than retaining the rejected
 oversized increment.
 If even one complete checkpoint exceeds the configured cap, recording stops
 without installing a new observer rather than retaining an oversized payload.
+Checkpoints inside the current window remain in the tail when they fit the caps:
+opening a modal does not discard the action that opened it. Meta and its following
+page snapshot advance together when eviction crosses a navigation boundary. Input
+values and native page scroll offsets are folded along with DOM/ScrollView changes.
+Immutable event byte counts are cached, so each scroll event does not reserialize
+the unchanged static stylesheet or image-heavy baseline. Removed virtual node IDs
+and native listeners are released; a mutation batch exceeding `mutationLimit`
+(10,000 by default, following the official Replay default) stops with
+`mutation-limit` before serializing the batch.
 
 ## Scroll-view recording
 
@@ -102,10 +151,11 @@ including structural checkpoints. A weak cache keyed by the live virtual node
 preserves observed native offsets when error promotion restarts the recorder on
 the same mounted page. Before any scroll event, controlled numeric `scrollTop`
 and `scrollLeft` props supply the initial position. This covers Taro ScrollView
-content; native page/window scrolling and other component internals remain outside
+content. Native page/window scrolling additionally requires the lifecycle adapter's
+explicit `recordPageScroll` bridge described above; component internals remain outside
 the current recording boundary.
 
-The derivative-manager Replay POC fixture measured in WeChat DevTools on
+The host-app Replay POC fixture measured in WeChat DevTools on
 2026-10-09 uses a native input font size of 12 px and a warn-button background of
 `rgb(230, 67, 64)` (`#e64340`). The corresponding defaults above follow that live
 fixture; other platform/theme defaults still require their own validation.
@@ -169,8 +219,9 @@ files or downloaded image data. Only explicit own properties are used, only for
 Taro Image `src`; unlisted or changed runtime SVG/data URLs retain the existing
 payload removal, including mixed-case `Data:` / `DATA:` schemes, leading C0
 control characters/spaces, and ASCII tabs or newlines within the scheme. That
-browser-compatible detection does not normalize whitelist keys or rewrite
-non-data URL content. The SDK does not read platform files or fetch assets.
+browser-compatible detection does not normalize whitelist keys. Non-whitelisted
+URLs remove browser-ignored C0/ASCII whitespace, query/fragment and user information,
+including protocol-relative URLs. The SDK does not read platform files or fetch assets.
 
 ## Privacy and resource defaults
 
@@ -188,6 +239,23 @@ false` only for known synthetic content.
   ancestor marker checkpoints descendant values with their current privacy rules.
   New input objects do not inherit a reused `sid`; keep the explicit marker on
   password fields and their replacements when they may mount in the revealed state.
+- `maskAllInputs` is the official spelling and overrides the compatible
+  `maskInputValues` spelling when both are supplied. `blockAllMedia` defaults to
+  true: untrusted runtime Image/img sources, native media and WebView resource URLs
+  (including video posters), and CSS image URLs are withheld. This applies even
+  when an unsupported native component is represented only by a placeholder. Audited
+  `staticImageSources` entries remain an explicit per-image opt-in; packaged Home
+  icons do not need a global media opt-out. `data-sentry-unblock`/`sentry-unblock`
+  or `blockAllMedia: false` permits dynamic media URLs, still with URL scrubbing.
+- As in the official configuration, `maskAttributes` defaults to `title`,
+  `placeholder`, and `aria-label`, independently of the global text opt-out.
+  `data-sentry-mask`/`sentry-mask` on an ancestor forces descendant text, display
+  attributes and input values to remain masked. `data-sentry-unmask`/`sentry-unmask`
+  permits ordinary text/attributes, but does not override an explicit mask or a
+  password's sticky protection. `data-sentry-block`/`sentry-block` records an empty
+  placeholder without subtree content or attributes; its DOM/native updates are
+  ignored until unblocked. `data-sentry-ignore`/`sentry-ignore` suppresses native
+  interaction/input events. Arbitrary browser CSS selectors are not evaluated.
 - Common credential/identifier attributes stay filtered independently of the
   text/input masking settings.
 - Capture, network, and DOM-attribute URLs drop query strings, fragments, URL
@@ -197,6 +265,11 @@ false` only for known synthetic content.
   roughly 512 KiB unless the caller supplies different limits. Error-buffer
   callers can set `rollingWindowMs`; this rolls by time/event/bytes while
   preserving the Meta + FullSnapshot checkpoint.
+- Non-finite numeric limits fall back to these defaults. Finite limits are
+  rounded down and bounded: duration 1 ms–1 hour, event count 1–100,000, bytes
+  1–20 MiB, mutation batch 1–100,000, and rolling history 0–60 seconds (30 seconds
+  for an invalid configured window). These ceilings keep a misconfigured caller
+  from disabling the recorder's memory and duration safeguards.
 - Replay IDs are UUIDv4 values and byte limits count UTF-8 bytes.
 
 The low-level API accepts metadata for envelope construction, so direct users
@@ -206,10 +279,16 @@ and filters common sensitive breadcrumb keys before they reach the recorder.
 
 ## Current compatibility boundary
 
-The verified path is Taro 4.2 + React on WeChat. The experiment does not claim
-support for native mini-program page trees, Canvas, WebView, native components,
-pixel-perfect WXSS reconstruction, multi-page stitching, buffered error Replay,
-sampling, persistent segment queues, or every supported mini-program platform.
+The supported recorder path is Taro 4.2 + React on WeChat. The 2026-10-11 extensions
+above have local regression evidence; device and actual Sentry Playback acceptance
+remain separate release gates. Native page trees, Canvas pixels, WebView documents,
+native component internals, browser selection ranges and pixel-perfect WXSS or native
+theme reconstruction are not exposed by this virtual DOM and are not synthesized.
+The adapter owns session sampling, error promotion, navigation stitching, ordered
+delivery and lifecycle hooks. Browser-only facilities such as CSSOM observers,
+cross-origin iframe access, web-vitals and dead/rage-click detection are not implied
+by emitting compatible rrweb events. There is no claim of every mini-program platform
+or arbitrary DOM-selector support.
 
 Before widening support, validate each platform with feature detection and a
 safe no-op fallback, then test playback plus the Breadcrumbs, Network, Tags,

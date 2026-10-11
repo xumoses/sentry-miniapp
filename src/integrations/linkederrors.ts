@@ -1,12 +1,5 @@
-import type {
-  Event,
-  EventHint,
-  Exception,
-  ExtendedError,
-  Integration,
-  IntegrationFn,
-} from '@sentry/core';
-import { exceptionFromError, getCurrentScope } from '@sentry/core';
+import type { Event, EventHint, Integration, IntegrationFn } from '@sentry/core';
+import { applyAggregateErrorsToEvent, exceptionFromError, getCurrentScope } from '@sentry/core';
 
 const DEFAULT_KEY = 'cause';
 const DEFAULT_LIMIT = 5;
@@ -75,22 +68,11 @@ export class LinkedErrors implements Integration {
       return event;
     }
 
-    const linkedErrors = this._walkErrorTree(hint.originalException as ExtendedError, this._key);
-    event.exception.values = [...linkedErrors, ...event.exception.values];
-
-    return event;
-  }
-
-  /**
-   * @inheritDoc
-   */
-  private _walkErrorTree(error: ExtendedError, key: string, stack: Exception[] = []): Exception[] {
-    if (!isInstanceOf(error[key], Error) || stack.length + 1 >= this._limit) {
-      return stack;
+    const parser = getCurrentScope().getClient()?.getOptions().stackParser;
+    if (typeof parser === 'function') {
+      applyAggregateErrorsToEvent(exceptionFromError, parser, this._key, this._limit, event, hint);
     }
-
-    const exception = exceptionFromError(() => [], error[key]);
-    return this._walkErrorTree(error[key], key, [exception, ...stack]);
+    return event;
   }
 }
 

@@ -2,6 +2,16 @@ import { defineConfig } from 'vite';
 import { resolve } from 'path';
 import dts from 'vite-plugin-dts';
 
+// Symlinked package stores may resolve outside the checkout. Publish portable
+// dependency source names instead of embedding a developer's machine paths.
+function sourcemapPathTransform(sourcePath) {
+  const normalized = sourcePath.replace(/\\/g, '/');
+  const dependencyStart = normalized.lastIndexOf('/node_modules/');
+  return dependencyStart >= 0
+    ? `../node_modules/${normalized.slice(dependencyStart + '/node_modules/'.length)}`
+    : normalized;
+}
+
 // 通用构建配置
 const baseConfig = {
   build: {
@@ -34,6 +44,7 @@ export default defineConfig(({ mode }) => {
           // 小程序版本内联所有依赖
           external: [],
           output: {
+            sourcemapPathTransform,
             format: 'cjs',
             exports: 'auto'
           }
@@ -59,16 +70,19 @@ export default defineConfig(({ mode }) => {
         external: [],
         output: [
           {
+            sourcemapPathTransform,
             format: 'es',
             entryFileNames: 'sentry-miniapp.esm.js',
             exports: 'named'
           },
           {
+            sourcemapPathTransform,
             format: 'cjs',
             entryFileNames: 'sentry-miniapp.cjs.js',
             exports: 'auto'
           },
           {
+            sourcemapPathTransform,
             format: 'umd',
             entryFileNames: 'sentry-miniapp.umd.js',
             name: 'SentryMiniapp',

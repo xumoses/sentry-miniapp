@@ -1,4 +1,4 @@
-import { addBreadcrumb, setContext } from '@sentry/core';
+import { addBreadcrumb, setContext, getClient } from '@sentry/core';
 import type { Integration } from '@sentry/core';
 import { subscribeAppLifecycle } from '../appLifecycle';
 
@@ -55,6 +55,7 @@ export class PageBreadcrumbs implements Integration {
   private _unsubscribeApp: (() => void) | null = null;
   private _launchTime: number = 0;
   private _firstPageReady: boolean = false;
+  private _active = false;
 
   constructor(options: PageBreadcrumbsOptions = {}) {
     this._options = {
@@ -65,6 +66,7 @@ export class PageBreadcrumbs implements Integration {
   }
 
   public setupOnce(): void {
+    this._active = true;
     this._wrapPage();
     this._subscribeApp();
   }
@@ -87,8 +89,10 @@ export class PageBreadcrumbs implements Integration {
       this._firstPageReady = v;
     };
     const getLaunchTime = () => this._launchTime;
+    const isActive = () => this._active;
 
     const wrappedPage = function (pageOptions: any) {
+      if (!isActive()) return originalPage(pageOptions);
       if (pageOptions && typeof pageOptions === 'object') {
         // 包装生命周期方法
         if (options.enableLifecycle) {
@@ -96,6 +100,7 @@ export class PageBreadcrumbs implements Integration {
             if (typeof pageOptions[method] === 'function') {
               const original = pageOptions[method];
               pageOptions[method] = function (this: any, ...args: any[]) {
+                if (!isActive()) return original.apply(this, args);
                 const route = this?.route || this?.__route__ || 'unknown';
                 const breadcrumbData: Record<string, any> = {
                   action: method,
@@ -103,7 +108,12 @@ export class PageBreadcrumbs implements Integration {
                 };
 
                 // 记录 onLoad 的 query 参数
-                if (method === 'onLoad' && args[0] && typeof args[0] === 'object') {
+                if (
+                  getClient()?.getOptions().sendDefaultPii === true &&
+                  method === 'onLoad' &&
+                  args[0] &&
+                  typeof args[0] === 'object'
+                ) {
                   breadcrumbData['query'] = args[0];
                 }
 
@@ -136,6 +146,7 @@ export class PageBreadcrumbs implements Integration {
             if (typeof pageOptions[key] === 'function' && isUserInteractionHandler(key)) {
               const original = pageOptions[key];
               pageOptions[key] = function (this: any, event: any, ...rest: any[]) {
+                if (!isActive()) return original.apply(this, [event, ...rest]);
                 const route = this?.route || this?.__route__ || 'unknown';
                 const breadcrumbData: Record<string, any> = {
                   handler: key,
@@ -146,7 +157,8 @@ export class PageBreadcrumbs implements Integration {
                 if (event && typeof event === 'object') {
                   if (event.target) {
                     if (event.target.id) breadcrumbData['targetId'] = event.target.id;
-                    if (event.target.dataset) breadcrumbData['dataset'] = event.target.dataset;
+                    if (getClient()?.getOptions().sendDefaultPii === true && event.target.dataset)
+                      breadcrumbData['dataset'] = event.target.dataset;
                   }
                   if (event.type) breadcrumbData['eventType'] = event.type;
                   // 提取触摸坐标
@@ -217,6 +229,7 @@ export class PageBreadcrumbs implements Integration {
    * 清理资源：恢复原始 Page() 构造函数，并退订 App 生命周期。
    */
   public cleanup(): void {
+    this._active = false;
     const global = globalThis as any;
     if (this._originalPage) {
       // 安全还原：仅当当前 Page 仍是本实例创建的包装时才还原，避免把他人后续包装的 Page 一并清掉。

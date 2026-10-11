@@ -1,6 +1,8 @@
+import { getClient } from '@sentry/core';
 import type { Event, Integration, IntegrationFn } from '@sentry/core';
 
 import { getSystemInfo, getAccountInfo } from '../crossPlatform';
+import type { MiniappOptions } from '../types';
 
 /** Add node request data to the event */
 export class HttpContext implements Integration {
@@ -25,28 +27,29 @@ export class HttpContext implements Integration {
    * @inheritDoc
    */
   public processEvent(event: Event): Event {
+    if ((getClient()?.getOptions() as MiniappOptions | undefined)?.enableSystemInfo === false)
+      return event;
     // runtime 与 appId 来源的 app 是本集成独有的贡献。
     // device 由 MiniappClient._prepareEvent 统一写（唯一权威，避免多处重复）；
     // network 由 NetworkStatusIntegration 写（带连接状态，且不走异步回调时序）。
     //
-    // app 上下文的两个版本字段语义不同，刻意并存：
-    //   - app.version       = 小程序自身版本（getAccountInfoSync().miniProgram.version）
-    //   - app.app_version   = 宿主基础库版本（client._prepareEvent 由 SDKVersion 写入）
-    // 两者键不冲突，合并后并存，便于排查「小程序版本 vs 运行时基础库版本」两类问题。
+    // Canonical app_version is the miniapp version; host/base-library versions have separate contexts.
     const miniappVersion = this._getMiniappVersion();
     const account = getAccountInfo();
 
     event.contexts = {
       ...event.contexts,
       runtime: {
-        ...(event.contexts?.['runtime'] || {}),
         name: 'miniapp',
         version: miniappVersion,
+        ...(event.contexts?.['runtime'] || {}),
       },
       app: {
-        ...(event.contexts?.['app'] || {}),
+        app_identifier: account.appId,
         name: account.appId,
         version: account.version,
+        app_version: account.version,
+        ...(event.contexts?.['app'] || {}),
       },
     };
 
@@ -58,7 +61,7 @@ export class HttpContext implements Integration {
    */
   private _getMiniappVersion(): string {
     const sys = getSystemInfo();
-    return sys?.version || sys?.SDKVersion || 'unknown';
+    return sys?.SDKVersion || sys?.version || 'unknown';
   }
 }
 

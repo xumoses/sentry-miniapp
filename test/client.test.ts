@@ -157,12 +157,12 @@ describe('MiniappClient', () => {
       });
 
       expect(event?.contexts?.os).toEqual({
-        name: 'iOS 15.0',
-        version: '8.0.0',
+        name: 'iOS',
+        version: '15.0',
       });
 
       expect(event?.contexts?.app).toEqual({
-        app_version: '2.19.4',
+        app_version: 'unknown',
       });
     });
 
@@ -202,7 +202,6 @@ describe('MiniappClient', () => {
 
       expect(event?.contexts?.os).toEqual({
         name: 'unknown',
-        version: '8.0.0',
       });
 
       expect(event?.contexts?.app).toEqual({
@@ -235,7 +234,6 @@ describe('MiniappClient', () => {
 
       expect(event?.contexts?.os).toEqual({
         name: 'unknown',
-        version: 'unknown',
       });
 
       expect(event?.contexts?.app).toEqual({

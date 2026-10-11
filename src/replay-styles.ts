@@ -48,3 +48,72 @@ export function normalizeReplayRpx(css: string, width: number): string {
     },
   );
 }
+
+/** Runtime CSS is untrusted; unlike build CSS its URLs must cross the Replay URL policy. */
+export function sanitizeReplayStyle(
+  css: string,
+  sanitizeUrl: (url: string) => string,
+  blockMedia: boolean,
+): string {
+  // CSS accepts some EOF-terminated URL tokens. Drop malformed runtime styles rather
+  // than letting an incomplete token bypass the structured URL scanner below.
+  let quote = '';
+  let depth = 0;
+  for (let index = 0; index < css.length; index++) {
+    const char = css[index];
+    if (char === '\\') {
+      index++;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = '';
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === '/' && css[index + 1] === '*') {
+      const end = css.indexOf('*/', index + 2);
+      if (end < 0) return '';
+      index = end + 1;
+    } else if (char === '(') depth++;
+    else if (char === ')' && --depth < 0) return '';
+  }
+  if (quote || depth) return '';
+  const decode = (value: string): string =>
+    value.replace(
+      /\\([\da-f]{1,6})\s?|\\([^\r\n])|\\\r?\n/gi,
+      (_match, hex: string | undefined, literal: string | undefined) => {
+        if (!hex) return literal ?? '';
+        const code = parseInt(hex, 16);
+        return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : '\ufffd';
+      },
+    );
+  const quoted = (value: string): string => JSON.stringify(value).replace(/</g, '\\3c ');
+  // Parse URL tokens before strings, including escaped CSS identifiers and URL contents.
+  return css.replace(
+    /\/\*[\s\S]*?\*\/|(?:[a-z_-]|\\(?:[\da-f]{1,6}\s?|.))+(?:\s*)\((?:"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|\\[\s\S]|[^()"'\\])*\)|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'/gi,
+    (token) => {
+      if (token.startsWith('/*')) return '';
+      const open = token.indexOf('(');
+      if (open >= 0 && decode(token.slice(0, open)).trim().toLowerCase() === 'url') {
+        let value = token.slice(open + 1, -1).trim();
+        if (/^["']/.test(value)) value = value.slice(1, -1);
+        return `url(${quoted(blockMedia ? '' : sanitizeUrl(decode(value)))})`;
+      }
+      if (open >= 0) {
+        // image-set() and other functions can contain string URLs.
+        return (
+          token.slice(0, open + 1) +
+          sanitizeReplayStyle(token.slice(open + 1, -1), sanitizeUrl, blockMedia) +
+          ')'
+        );
+      }
+      const value = decode(token.slice(1, -1));
+      return /^(?:[a-z][\w+.-]*:|\/\/)/i.test(value.trim())
+        ? quoted(blockMedia ? '' : sanitizeUrl(value))
+        : token;
+    },
+  );
+}
