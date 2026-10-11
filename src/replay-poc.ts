@@ -215,6 +215,9 @@ interface ScrollPosition {
 // creates a new recorder. Weak keys release the offset with the virtual node.
 const scrollPositions = new WeakMap<TaroReplayNodeLike, ScrollPosition>();
 const pickerValues = new WeakMap<TaroReplayNodeLike, number[]>();
+// A mounted input remains sensitive across buffer promotion and page reattachment.
+// Object identity avoids retaining unmounted nodes or inheriting a reused sid.
+const sensitiveInputs = new WeakSet<TaroReplayNodeLike>();
 
 function isRootPortal(node: TaroReplayNodeLike): boolean {
   return normaliseNodeName(node) === 'root-portal';
@@ -436,16 +439,15 @@ export function startTaroDomReplayPoc(
     `${TARO_REPLAY_BASE_STYLESHEET}\n${options.stylesheet || ''}`,
     viewportWidth,
   );
-  const sensitiveInputs = new WeakSet<TaroReplayNodeLike>();
 
   function shouldMaskInputValues(node: TaroReplayNodeLike): boolean {
     if (!isInputNode(node)) return false;
     if (
       hasMaskingFlag(node, 'password') ||
       String(rawAttributeValue(node, 'type') ?? '').toLowerCase() === 'password' ||
-      hasMaskingFlag(node, 'data-sentry-mask')
+      hasNodeAncestor(node, (ancestor) => hasMaskingFlag(ancestor, 'data-sentry-mask'))
     ) {
-      // A password reveal toggle must not turn this recording's password field into clear text.
+      // A password reveal toggle must not turn this mounted input into clear text.
       sensitiveInputs.add(node);
     }
     return maskInputValues || sensitiveInputs.has(node);
@@ -953,6 +955,9 @@ export function startTaroDomReplayPoc(
       (record) =>
         (record.type === 'attributes' &&
           ((isRootPortal(record.target) && record.attributeName?.toLowerCase() === 'enable') ||
+            // An ancestor marker changes descendant privacy without an input mutation.
+            (record.attributeName?.toLowerCase() === 'data-sentry-mask' &&
+              !isInputNode(record.target)) ||
             (isPickerView(record.target) &&
               ['value', 'defaultvalue', 'indicatorstyle'].includes(
                 record.attributeName?.toLowerCase() ?? '',

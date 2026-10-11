@@ -161,10 +161,15 @@ false` only for known synthetic content.
 - Ordinary input values are masked by default. With `maskInputValues: false`,
   ordinary input values remain visible while password values always stay masked.
   Password fields are detected from Taro `password: true`, HTML `type: "password"`,
-  or an explicit `data-sentry-mask="true"` attribute. Keep that explicit marker on
-  login inputs even when their password reveal toggle is already enabled when
-  recording starts. Once identified, an input stays masked for the rest of that
-  recording, including value mutations and password/type changes.
+  or an explicit `data-sentry-mask="true"` attribute on the input or an ancestor.
+  Keep that explicit marker on login inputs even when their password reveal toggle
+  is already enabled when recording starts. Once identified, an input stays masked
+  through value mutations and password/type changes. Sensitivity follows the same
+  mounted input object across recorder restarts, error-buffer promotion and page
+  reattachment, and is retained weakly until that input is released. Changing an
+  ancestor marker checkpoints descendant values with their current privacy rules.
+  New input objects do not inherit a reused `sid`; keep the explicit marker on
+  password fields and their replacements when they may mount in the revealed state.
 - Common credential/identifier attributes stay filtered independently of the
   text/input masking settings.
 - Capture, network, and DOM-attribute URLs drop query strings, fragments, URL
