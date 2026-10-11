@@ -8,7 +8,7 @@
   },
   "homepage": "https://github.com/xumoses/sentry-miniapp",
   "scripts": {
-    "build": "vite build && npm run sync:examples && npm run verify:build-sourcemaps",
+    "build": "vite build --mode modules && vite build --mode umd && npm run verify:build-syntax && npm run sync:examples && npm run verify:build-sourcemaps",
     "sync:examples": "cp dist/sentry-miniapp.umd.js examples/wxapp/lib/sentry-miniapp.js && cp dist/sentry-miniapp.umd.js.map examples/wxapp/lib/sentry-miniapp.js.map",
     "build:miniapp": "vite build --mode miniapp",
     "build:types": "vite build && tsc --emitDeclarationOnly --outDir dist/types",
@@ -24,7 +24,8 @@
     "prepublishOnly": "npm run verify:beta-release && npm run build",
     "prepare": "husky",
     "release": "commit-and-tag-version --prerelease beta",
-    "verify:build-sourcemaps": "node scripts/verify-build-sourcemaps.cjs"
+    "verify:build-sourcemaps": "node scripts/verify-build-sourcemaps.cjs",
+    "verify:build-syntax": "node scripts/verify-build-syntax.cjs"
   },
   "author": "dancerlzy@gmail.com",
   "license": "MIT",

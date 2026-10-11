@@ -17,6 +17,7 @@ import {
   TARO_REPLAY_BASE_STYLESHEET,
 } from './replay-styles';
 import { boundReplayEvents } from './replay-buffer';
+import { createCheckpointRebaser } from './rebase';
 
 export const TARO_DOM_REPLAY_POC_MARKER = 'TARO_DOM_REPLAY_POC';
 
@@ -173,6 +174,8 @@ export interface StartTaroDomReplayPocOptions {
   maskAllInputs?: boolean;
   /** Defaults to true; audited staticImageSources are an explicit per-image permission. */
   blockAllMedia?: boolean;
+  /** Opt in to explicitly marked Canvas image frames; pixels cannot be text-masked. */
+  recordCanvas?: boolean;
   /** Attributes whose display text is masked; defaults to title, placeholder and aria-label. */
   maskAttributes?: readonly string[];
   /** Stop an excessive observer batch rather than blocking the application logic thread. */
@@ -198,6 +201,8 @@ export interface TaroDomReplayPocController {
   takeSegment(): TaroReplayPocCapture;
   recordPageScroll(position: { scrollTop?: number; scrollLeft?: number }): boolean;
   recordViewport(size: { width: number; height: number }): boolean;
+  /** Read one explicitly marked, currently mounted Canvas/container frame. */
+  recordCanvas(node: TaroReplayNodeLike, readFrame: () => string | undefined): boolean;
 }
 
 const TAG_MAP: Record<string, string> = {
@@ -233,6 +238,8 @@ const MEDIA_NODE_NAMES = new Set([
 ]);
 const SYNTHETIC_NODE_MAX_ID = 9;
 const MAX_STATIC_IMAGE_SOURCE_BYTES = 128 * 1024;
+const MAX_CANVAS_FRAME_BYTES = 128 * 1024;
+const CANVAS_FRAME_INTERVAL_MS = 1000;
 const STATIC_IMAGE_DATA_URI =
   /^data:image\/(?:png|jpeg|gif|webp|avif);base64,[A-Za-z0-9+/]+={0,2}$/;
 const STATIC_SVG_BASE64_DATA_URI =
@@ -254,6 +261,51 @@ function isStaticImageDataUri(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Validate the encoding and raster signature without browser/Node decoding APIs. */
+function isCanvasFrame(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length > MAX_CANVAS_FRAME_BYTES) return false;
+  const match = /^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/.exec(value);
+  if (!match) return false;
+  const encoded = match[2]!;
+  if (encoded.length % 4) return false;
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  const padding = encoded.endsWith('==') ? 2 : encoded.endsWith('=') ? 1 : 0;
+  if (
+    (padding === 2 && alphabet.indexOf(encoded[encoded.length - 3]!) % 16) ||
+    (padding === 1 && alphabet.indexOf(encoded[encoded.length - 2]!) % 4)
+  )
+    return false;
+  const length = (encoded.length / 4) * 3 - padding;
+  const byte = (index: number): number => {
+    const offset = Math.floor(index / 3) * 4;
+    const shift = index % 3;
+    const a = alphabet.indexOf(encoded[offset + shift]!);
+    const b = alphabet.indexOf(encoded[offset + shift + 1]!);
+    return shift === 0
+      ? (a << 2) | (b >> 4)
+      : shift === 1
+        ? ((a & 15) << 4) | (b >> 2)
+        : ((a & 3) << 6) | b;
+  };
+  const matches = (offset: number, bytes: number[]): boolean =>
+    bytes.every((value, index) => byte(offset + index) === value);
+  if (match[1] === 'png')
+    return (
+      length >= 45 &&
+      matches(0, [137, 80, 78, 71, 13, 10, 26, 10]) &&
+      matches(8, [0, 0, 0, 13, 73, 72, 68, 82]) &&
+      matches(length - 12, [0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130])
+    );
+  if (match[1] === 'jpeg')
+    return length >= 4 && matches(0, [255, 216, 255]) && matches(length - 2, [255, 217]);
+  return (
+    length >= 20 &&
+    matches(0, [82, 73, 70, 70]) &&
+    matches(8, [87, 69, 66, 80]) &&
+    byte(4) + byte(5) * 256 + byte(6) * 65536 + byte(7) * 16777216 + 8 === length
+  );
 }
 
 const URL_ATTRIBUTE_NAMES = new Set([
@@ -584,6 +636,13 @@ export function startTaroDomReplayPoc(
   const rootListeners = new Map<string, (event: TaroReplayScrollEventLike) => void>();
   const lastInputValues = new WeakMap<TaroReplayNodeLike, string>();
   const byteSizes = new WeakMap<TaroReplayPocEvent, number>();
+  const canvasFrames = new Map<
+    TaroReplayNodeLike,
+    { imageId: number; frame?: string; lastReadAt: number }
+  >();
+  let serializedNodes = new WeakSet<TaroReplayNodeLike>();
+  let canvasCheckpoint: ReturnType<typeof createCheckpointRebaser<TaroReplayPocEvent>> | undefined;
+  let canvasCheckpointUpperBytes = 0;
   const eventSize = (event: TaroReplayPocEvent): number => {
     const cached = byteSizes.get(event);
     if (cached !== undefined) return cached;
@@ -638,8 +697,150 @@ export function startTaroDomReplayPoc(
     return id;
   }
 
+  function isCanvasContainer(node: TaroReplayNodeLike): boolean {
+    const marker = rawAttributeValue(node, 'data-sentry-canvas');
+    return (
+      options.recordCanvas === true &&
+      ['canvas', 'view'].includes(normaliseNodeName(node)) &&
+      (marker === true || marker === 'true')
+    );
+  }
+
+  function isCanvasProtected(node: TaroReplayNodeLike): boolean {
+    return (
+      isMasked(node) ||
+      isBlocked(node) ||
+      hasNodeAncestor(node, (ancestor) => privacyMarker(ancestor, 'ignore'))
+    );
+  }
+
+  function isInsideCanvas(node: TaroReplayNodeLike): boolean {
+    return Boolean(node.parentNode && hasNodeAncestor(node.parentNode, isCanvasContainer));
+  }
+
+  function isInCurrentRoot(node: TaroReplayNodeLike): boolean {
+    const visited = new Set<TaroReplayNodeLike>();
+    let current = node;
+    while (current !== options.root) {
+      if (visited.has(current)) return false;
+      visited.add(current);
+      const parent = current.parentNode;
+      if (!parent || !toArray(parent.childNodes).includes(current)) return false;
+      current = parent;
+    }
+    return true;
+  }
+
+  function canRecordCanvas(node: TaroReplayNodeLike): boolean {
+    return (
+      !stopped &&
+      isCanvasContainer(node) &&
+      serializedNodes.has(node) &&
+      isInCurrentRoot(node) &&
+      !isCanvasProtected(node)
+    );
+  }
+
+  function recordCanvas(node: TaroReplayNodeLike, readFrame: () => string | undefined): boolean {
+    if (!canRecordCanvas(node)) {
+      const previous = canvasFrames.get(node);
+      if (previous) delete previous.frame;
+      return false;
+    }
+    const state = canvasFrames.get(node);
+    if (!state) return false;
+    const readAt = now();
+    if (readAt - state.lastReadAt < CANVAS_FRAME_INTERVAL_MS) return false;
+    state.lastReadAt = readAt;
+    let frame: string | undefined;
+    try {
+      frame = readFrame();
+    } catch {
+      return false;
+    }
+    if (!canRecordCanvas(node) || canvasFrames.get(node) !== state) {
+      delete state.frame;
+      return false;
+    }
+    if (!isCanvasFrame(frame) || frame === state.frame) return false;
+    const event: TaroReplayPocEvent = {
+      type: RrwebEventType.IncrementalSnapshot,
+      timestamp: nextTimestamp(),
+      data: {
+        source: RrwebIncrementalSource.Mutation,
+        texts: [],
+        adds: [],
+        removes: [],
+        attributes: [{ id: state.imageId, attributes: { src: frame } }],
+      },
+    };
+    const retainedBytes =
+      [...canvasFrames.values()].reduce(
+        (total, candidate) => total + (candidate.frame?.length ?? 0),
+        0,
+      ) -
+      (state.frame?.length ?? 0) +
+      frame.length;
+    // Use only committed rrweb data. Serializing the live VDOM here would consume
+    // pending mutation values, even when this optional frame is ultimately rejected.
+    const futureCheckpoint =
+      canvasCheckpoint && createCheckpointRebaser(canvasCheckpoint.getSnapshot());
+    futureCheckpoint?.apply(event);
+    const metaBytes = utf8ByteLength(
+      JSON.stringify({
+        type: RrwebEventType.Meta,
+        timestamp: event.timestamp - 1,
+        data: { href: capture.href, width: viewportWidth, height: viewportHeight },
+      }),
+    );
+    if (
+      retainedBytes > Math.min(MAX_CANVAS_FRAME_BYTES, Math.floor(maxBytes / 4)) ||
+      capture.events.length >= maxEvents ||
+      capture.stats.approximateBytes + eventSize(event) > maxBytes ||
+      !futureCheckpoint ||
+      utf8ByteLength(JSON.stringify(futureCheckpoint.getSnapshot())) + metaBytes > maxBytes
+    ) {
+      warnings.add('Canvas frame skipped: recording budget exceeded');
+      capture.warnings = Array.from(warnings);
+      return false;
+    }
+    state.frame = frame;
+    try {
+      addEvent(event);
+    } catch {
+      // User onEvent callbacks must not interrupt the chart's render callback.
+    }
+    // A rolling buffer may fold the event straight into its baseline.
+    return !stopped;
+  }
+
+  function updateCanvasCheckpoint(event: TaroReplayPocEvent, bytes: number): void {
+    if (!options.recordCanvas) return;
+    if (event.type === RrwebEventType.FullSnapshot) {
+      canvasCheckpoint = createCheckpointRebaser(event);
+      canvasCheckpointUpperBytes = bytes;
+    } else if (
+      canvasCheckpoint &&
+      event.type === RrwebEventType.IncrementalSnapshot &&
+      [
+        RrwebIncrementalSource.Mutation,
+        RrwebIncrementalSource.Scroll,
+        RrwebIncrementalSource.Input,
+      ].includes(event.data['source'] as number)
+    ) {
+      canvasCheckpoint.apply(event);
+      canvasCheckpointUpperBytes += bytes;
+      if (canvasCheckpointUpperBytes > maxBytes) {
+        canvasCheckpointUpperBytes = utf8ByteLength(JSON.stringify(canvasCheckpoint.getSnapshot()));
+        // Bound the optional mirror even across repeatedly drained sessions.
+        // A later normal FullSnapshot can make Canvas capture eligible again.
+        if (canvasCheckpointUpperBytes > maxBytes) canvasCheckpoint = undefined;
+      }
+    }
+  }
+
   function attachScrollSubtree(node: TaroReplayNodeLike): void {
-    if (stopped || isBlocked(node)) return;
+    if (stopped || isBlocked(node) || isCanvasContainer(node) || isInsideCanvas(node)) return;
     if (
       isScrollView(node) &&
       node.addEventListener &&
@@ -712,6 +913,8 @@ export function startTaroDomReplayPoc(
   }
 
   function detachScrollSubtree(node: TaroReplayNodeLike): void {
+    canvasFrames.delete(node);
+    serializedNodes.delete(node);
     const sid = node.sid || node.uid;
     if (sid && nodesBySid.get(sid) === node) {
       nodesBySid.delete(sid);
@@ -879,6 +1082,7 @@ export function startTaroDomReplayPoc(
     node: TaroReplayNodeLike,
     portals?: SerializedElementNode[],
   ): SerializedNode {
+    serializedNodes.add(node);
     const nodeName = normaliseNodeName(node);
     if (isBlocked(node)) {
       return {
@@ -903,9 +1107,36 @@ export function startTaroDomReplayPoc(
     }
 
     const tagName = TAG_MAP[nodeName] || 'div';
-    if (!TAG_MAP[nodeName])
+    if (!TAG_MAP[nodeName] && !isCanvasContainer(node))
       warnings.add(`unsupported Taro node rendered as placeholder: ${nodeName}`);
     const attributes = readAttributes(node);
+    if (isCanvasContainer(node)) {
+      let state = canvasFrames.get(node);
+      if (!state) {
+        state = { imageId: nextNodeId++, lastReadAt: -Infinity };
+        canvasFrames.set(node, state);
+      }
+      if (isCanvasProtected(node)) delete state.frame;
+      return {
+        id: idFor(node),
+        type: RrwebNodeType.Element,
+        tagName: 'div',
+        attributes,
+        childNodes: [
+          {
+            id: state.imageId,
+            type: RrwebNodeType.Element,
+            tagName: 'img',
+            attributes: {
+              'data-sentry-canvas-frame': true,
+              style: 'display:block;width:100%;height:100%;object-fit:fill;pointer-events:none',
+              ...(state.frame ? { src: state.frame } : {}),
+            },
+            childNodes: [],
+          },
+        ],
+      };
+    }
     if (!TAG_MAP[nodeName]) attributes['data-taro-unsupported'] = nodeName;
 
     return {
@@ -918,6 +1149,7 @@ export function startTaroDomReplayPoc(
   }
 
   function fullSnapshot(): SerializedDocumentNode {
+    serializedNodes = new WeakSet();
     const styleText: SerializedTextNode = {
       id: 6,
       type: RrwebNodeType.Text,
@@ -939,6 +1171,9 @@ export function startTaroDomReplayPoc(
     };
     const portals: SerializedElementNode[] = [];
     const root = serializeNode(options.root, portals);
+    for (const node of canvasFrames.keys()) {
+      if (!serializedNodes.has(node) || !isCanvasContainer(node)) canvasFrames.delete(node);
+    }
     const body: SerializedElementNode = {
       id: 4,
       type: RrwebNodeType.Element,
@@ -987,6 +1222,7 @@ export function startTaroDomReplayPoc(
           capture.startedAt = alignedMeta.timestamp;
           capture.stats.approximateBytes = checkpointBytes;
           capture.stats.eventCount = capture.events.length;
+          updateCanvasCheckpoint(event, eventBytes);
           options.onEvent?.(JSON.parse(JSON.stringify(event)) as TaroReplayPocEvent);
           return true;
         }
@@ -1017,6 +1253,7 @@ export function startTaroDomReplayPoc(
         );
       }
       capture.stats.eventCount = capture.events.length;
+      updateCanvasCheckpoint(event, eventBytes);
       options.onEvent?.(JSON.parse(JSON.stringify(event)) as TaroReplayPocEvent);
       return capture.events.includes(event);
     }
@@ -1031,6 +1268,7 @@ export function startTaroDomReplayPoc(
     capture.events.push(event);
     capture.stats.eventCount = capture.events.length;
     capture.stats.approximateBytes += eventBytes;
+    updateCanvasCheckpoint(event, eventBytes);
     options.onEvent?.(JSON.parse(JSON.stringify(event)) as TaroReplayPocEvent);
     return true;
   }
@@ -1207,6 +1445,8 @@ export function startTaroDomReplayPoc(
         if (
           !node ||
           !idsByNode.has(node) ||
+          !serializedNodes.has(node) ||
+          isInsideCanvas(node) ||
           isBlocked(node) ||
           hasNodeAncestor(node, (ancestor) => privacyMarker(ancestor, 'ignore'))
         )
@@ -1315,6 +1555,33 @@ export function startTaroDomReplayPoc(
       stop('mutation-limit');
       return;
     }
+    records = records.filter(
+      (record) =>
+        !isInsideCanvas(record.target) &&
+        !(record.type === 'childList' && isCanvasContainer(record.target)),
+    );
+    if (!records.length) return;
+    for (const [node, state] of canvasFrames) {
+      if (
+        !isCanvasContainer(node) ||
+        isCanvasProtected(node) ||
+        !isInCurrentRoot(node) ||
+        records.some(
+          (record) =>
+            record.type === 'attributes' &&
+            (/^data-sentry-(?:canvas|mask|block|ignore)$/i.test(record.attributeName ?? '') ||
+              (/^(?:class|classname)$/i.test(record.attributeName ?? '') &&
+                /sentry-(?:mask|block|ignore)/.test(
+                  String(rawAttributeValue(record.target, record.attributeName!) ?? '') +
+                    String(
+                      lastAttributeValues.get(record.target)?.get(record.attributeName!) ?? '',
+                    ),
+                ))) &&
+            hasNodeAncestor(node, (ancestor) => ancestor === record.target),
+        )
+      )
+        delete state.frame;
+    }
     const visualCheckpoint = records.some(
       (record) =>
         (record.type === 'attributes' &&
@@ -1323,10 +1590,14 @@ export function startTaroDomReplayPoc(
             ['data-sentry-unmask', 'data-sentry-block', 'data-sentry-unblock'].includes(
               record.attributeName?.toLowerCase() ?? '',
             ) ||
+            (options.recordCanvas === true &&
+              ['data-sentry-canvas', 'data-sentry-ignore'].includes(
+                record.attributeName?.toLowerCase() ?? '',
+              )) ||
             (record.attributeName?.toLowerCase() === 'data-sentry-mask' &&
               !isInputNode(record.target)) ||
             (['class', 'classname'].includes(record.attributeName?.toLowerCase() ?? '') &&
-              /sentry-(?:mask|unmask|block|unblock)/.test(
+              /sentry-(?:mask|unmask|block|unblock|ignore)/.test(
                 String(rawAttributeValue(record.target, record.attributeName!) ?? '') +
                   String(lastAttributeValues.get(record.target)?.get(record.attributeName!) ?? ''),
               )) ||
@@ -1343,7 +1614,7 @@ export function startTaroDomReplayPoc(
     );
     if (visualCheckpoint) {
       for (const node of [...scrollListeners.keys(), ...pickerListeners.keys()]) {
-        if (isBlocked(node)) detachScrollSubtree(node);
+        if (isBlocked(node) || isInsideCanvas(node)) detachScrollSubtree(node);
       }
       for (const record of records) {
         mutationCount++;
@@ -1500,6 +1771,9 @@ export function startTaroDomReplayPoc(
     rootListeners.clear();
     nodesBySid.clear();
     idsBySid.clear();
+    canvasFrames.clear();
+    canvasCheckpoint = undefined;
+    serializedNodes = new WeakSet();
     for (const [node, listener] of pickerListeners) {
       try {
         node.removeEventListener?.('change', listener);
@@ -1531,6 +1805,7 @@ export function startTaroDomReplayPoc(
     takeSegment,
     recordPageScroll,
     recordViewport,
+    recordCanvas,
   };
 
   addEvent({

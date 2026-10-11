@@ -223,6 +223,83 @@ browser-compatible detection does not normalize whitelist keys. Non-whitelisted
 URLs remove browser-ignored C0/ASCII whitespace, query/fragment and user information,
 including protocol-relative URLs. The SDK does not read platform files or fetch assets.
 
+## Explicit Canvas frames
+
+Canvas recording is disabled by default. Set `recordCanvas: true` and put
+`data-sentry-canvas={true}` on each audited `canvas` or `view` container to opt in.
+Only that marked node is eligible; the marker does not grant permission to its
+descendants. Give the container an explicit rendered width and height in its
+layout styles. The recorder preserves those attributes on a `div` and reserves
+one stable synthetic `img` child before the first frame arrives. Its original
+children and their mutations, input, scrolling and pointer events are excluded.
+The virtual application tree and native chart remain unchanged.
+
+After a chart finishes drawing, the host supplies a synchronous lazy reader:
+
+```ts
+replay.recordCanvas(markedVirtualNode, () => nativeCanvas.toDataURL('image/png'));
+```
+
+The host owns native Canvas discovery, readiness and export APIs. The SDK never
+enumerates native canvases, exports the screen, reads platform files, or intercepts
+drawing commands. Native APIs which export asynchronously must first prepare a
+frame and then pass a reader for the prepared value, with their own current-page
+and privacy guards before native export. Use the chart's completed-render callback
+and a trailing throttle when needed to retain its final state. Missing APIs or an
+unavailable frame can return `undefined`; that keeps the previous frame.
+
+Before invoking the reader, the SDK checks the recorder's opt-in, marker, actual
+parent/child membership in its current root, previously serialized node identity,
+and every ancestor's `data-sentry-mask`, `data-sentry-block`, `data-sentry-ignore`
+or corresponding class. Protected, detached, replaced or stopped recorders cannot
+read pixels. The lifecycle adapter must stop/detach on page hide; the SDK cannot
+infer native page visibility. It rechecks membership and privacy after the reader
+returns. Marker revocation, subtree removal and explicit protection discard retained
+frame state; lifting protection never restores an earlier frame. Reader and
+event-callback exceptions cannot interrupt the chart render through this method.
+
+This explicit permission allows the selected pixels despite `blockAllMedia: true`;
+ordinary media retains its existing filtering. **Pixels cannot be text-masked**,
+including when `maskAllText` or `maskAllInputs` is enabled. Audit all chart labels,
+tooltips and surrounding content before opting in. This follows the official
+[Sentry Canvas opt-in and pixel privacy boundary](https://github.com/getsentry/sentry-docs/blob/master/docs/platforms/javascript/common/session-replay/index.mdx#canvas-recording).
+It is a static-frame mini-program bridge, not the browser Canvas recorder.
+
+The reader is attempted at most once per second per live node, including failures.
+Only canonical base64 PNG, JPEG or WebP data URIs with matching raster signatures
+are accepted, with a 128 KiB limit on the complete URI. This validates encoding
+and file signatures, not the meaning or privacy of the pixels. Identical frames
+are deduplicated. Retained frame URIs across all nodes are capped at the smaller
+of 128 KiB and one quarter of `maxBytes`. Before accepting a changed frame, the
+recorder also checks current segment bytes/events and the next complete checkpoint
+using only already committed rrweb state. Budget exhaustion returns `false`, records
+a bounded diagnostic, keeps the previous frame and leaves normal Replay running.
+An optional bounded checkpoint mirror supports this check across drained segments;
+it is released on stop. A subsequent normal checkpoint can re-enable Canvas after
+an oversized DOM state made its mirror ineligible. These limits do not change the
+recorder's normal duration or mutation limits.
+
+Frames use ordinary rrweb source-0 `img.src` attribute increments, and the last
+accepted image is retained in full snapshots, session segments and rolling rebases.
+This avoids relying on a dynamic `rr_dataURL` canvas attribute: rrweb's
+[snapshot rebuild](https://github.com/rrweb-io/rrweb/blob/master/packages/rrweb-snapshot/src/rebuild.ts)
+draws that attribute at rebuild time, whereas the ordinary
+[attribute replay path](https://github.com/rrweb-io/rrweb/blob/master/packages/rrweb/src/replay/index.ts)
+supports live `img.src` updates. No continuous video or drawing-command equivalence
+is claimed. WeChat API availability must be feature-detected; the official
+[mini-program API declarations](https://github.com/wechat-miniprogram/api-typings/blob/master/types/wx/lib.wx.api.d.ts)
+describe `Canvas.toDataURL`, `canvasToTempFilePath` and filesystem reads.
+
+Local release verification runs `yarn build`, which first replaces `dist` with the
+minified ESM/CJS outputs and then appends the UMD output. Vite 6's UMD helper
+injection interprets replacement-string tokens in minified identifiers; this
+separate UMD pass disables identifier minification while retaining syntax and
+whitespace compression. The mini-program CJS output keeps full minification.
+The build parses all three actual bundles, executes the browser UMD exports,
+then synchronizes the example and verifies portable source maps. Direct
+`vite build`, `build:types` and `dev` continue emitting all formats with safe UMD
+settings; `build:miniapp` retains its separate CommonJS example build.
+
 ## Privacy and resource defaults
 
 - All text nodes and text mutations are masked by default. Set `maskAllText:
@@ -281,7 +358,7 @@ and filters common sensitive breadcrumb keys before they reach the recorder.
 
 The supported recorder path is Taro 4.2 + React on WeChat. The 2026-10-11 extensions
 above have local regression evidence; device and actual Sentry Playback acceptance
-remain separate release gates. Native page trees, Canvas pixels, WebView documents,
+remain separate release gates. Native page trees, unmarked Canvas pixels, WebView documents,
 native component internals, browser selection ranges and pixel-perfect WXSS or native
 theme reconstruction are not exposed by this virtual DOM and are not synthesized.
 The adapter owns session sampling, error promotion, navigation stitching, ordered

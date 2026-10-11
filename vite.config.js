@@ -56,9 +56,20 @@ export default defineConfig(({ mode }) => {
     };
   }
 
-  // 标准 npm 包构建配置
+  // Vite 6's UMD helper injection uses a replacement string. A minified helper
+  // containing `$&&` is interpreted as `$&` and corrupts the emitted JavaScript.
+  // Build UMD separately with stable identifier names, leaving miniapp CJS/ESM
+  // minification intact. Upstream uses a callback replacement instead:
+  // https://github.com/vitejs/vite/blob/main/packages/vite/src/node/plugins/esbuild.ts
+  const umdOnly = mode === 'umd';
+  const modulesOnly = mode === 'modules';
+
+  // 标准 npm 包构建配置（npm build 依次生成 ESM/CJS 和 UMD）
   return {
     ...baseConfig,
+    // Direct `vite build`, build:types and dev --watch still emit all formats.
+    // Only the production modules pass enables identifier minification.
+    ...(!modulesOnly ? { esbuild: { minifyIdentifiers: false } } : {}),
     build: {
       ...baseConfig.build,
       lib: {
@@ -66,6 +77,7 @@ export default defineConfig(({ mode }) => {
         name: 'SentryMiniapp',
       },
       outDir: 'dist',
+      emptyOutDir: !umdOnly,
       rollupOptions: {
         external: [],
         output: [
@@ -89,10 +101,10 @@ export default defineConfig(({ mode }) => {
             exports: 'auto',
             globals: {}
           }
-        ]
+        ].filter((output) => umdOnly ? output.format === 'umd' : modulesOnly ? output.format !== 'umd' : true)
       }
     },
-    plugins: [
+    plugins: umdOnly ? [] : [
       // 生成 TypeScript 类型定义文件
       dts({
         include: ['src/**/*'],
