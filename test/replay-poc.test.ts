@@ -882,7 +882,7 @@ describe('Taro DOM Replay POC', () => {
       ?.emit([{ type: 'childList', target: root, addedNodes: [added], removedNodes: [] }]);
 
     const events = controller.getCapture().events;
-    expect(mutationData(events[2] as TaroReplayPocEvent).adds).toHaveLength(1);
+    expect(mutationData(events[2] as TaroReplayPocEvent).adds).toHaveLength(2);
     expect(events.map((event) => event.type)).toEqual([4, 2, 3]);
     expect(JSON.stringify(events[2])).toContain('new child');
     controller.stop();

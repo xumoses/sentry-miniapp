@@ -147,8 +147,14 @@ defaults. This improves the recorded layout without claiming full native compone
 or platform theme equivalence. Stylesheet bytes count toward the existing capture
 limits.
 
-Ordinary element insertions are serialized once in rrweb Mutation `adds`, including
-their child subtree, instead of appending another full DOM/CSS checkpoint. Privacy
+Ordinary element insertions use flat rrweb Mutation `adds`, with one entry for the
+parent and each descendant, instead of appending another full DOM/CSS checkpoint.
+Incremental playback uses `buildNodeWithSN({ skipChild: true })`, so embedding a
+subtree inside one add would display only its empty parent. The already sanitized
+serialized tree is flattened parent-first with right-to-left sibling dependencies;
+this includes synthetic Canvas image nodes and preserves blocked empty placeholders.
+See the upstream [incremental rebuild](https://github.com/rrweb-io/rrweb/blob/master/packages/rrweb/src/replay/index.ts).
+Privacy
 boundary changes, root portals, picker structure and viewport/rpx changes still
 receive complete snapshots where their browser representation needs rebuilding.
 Child-list batches use the final mounted virtual tree: transient added-then-removed

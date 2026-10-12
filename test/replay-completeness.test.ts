@@ -452,7 +452,23 @@ describe('bounded session streaming', () => {
   function playback(controller: ReturnType<typeof startTaroDomReplayPoc>): PlaybackNode[] {
     const events = controller.getCapture().events;
     const state = createCheckpointRebaser(events[1]!);
-    events.slice(2).forEach((event) => state.apply(event));
+    events.slice(2).forEach((event) => {
+      if (event.type === 3 && event.data['source'] === 0) {
+        // rrweb's incremental rebuild uses buildNodeWithSN(skipChild:true), unlike
+        // a FullSnapshot. A nested-only addition must not accidentally pass here.
+        const adds = event.data['adds'] as Array<{ node: PlaybackNode }>;
+        state.apply({
+          ...event,
+          data: {
+            ...event.data,
+            adds: adds.map((add) => ({
+              ...add,
+              node: add.node.childNodes ? { ...add.node, childNodes: [] } : add.node,
+            })),
+          },
+        });
+      } else state.apply(event);
+    });
     const nodes: PlaybackNode[] = [];
     const visit = (node: PlaybackNode): void => {
       nodes.push(node);
@@ -466,6 +482,59 @@ describe('bounded session streaming', () => {
       .filter((node) => node.textContent && !node.textContent.startsWith('html,body'))
       .map((node) => node.textContent!);
   }
+
+  it('requires flat incremental text descendants for rrweb skipChild playback', () => {
+    const root = element();
+    const h = harness(root);
+    const controller = start({ root, MutationObserver: h.MutationObserver, maskAllText: false });
+    const nested = element('view', {}, [
+      text('prefix'),
+      element('text', {}, [text('visible child')]),
+    ]);
+    nested.parentNode = root;
+    root.childNodes = [nested];
+    h.mutate([{ type: 'childList', target: root, addedNodes: [nested] }]);
+    const capture = controller.getCapture();
+    const adds = capture.events.at(-1)!.data['adds'] as Array<{
+      parentId: number;
+      nextId: number | null;
+      node: PlaybackNode;
+    }>;
+    expect(adds).toHaveLength(4);
+    const available = new Set<number>();
+    // The initial parent already exists; every newly introduced parent/next sibling
+    // must precede its dependent descendant in this event.
+    available.add(adds[0]!.parentId);
+    for (const add of adds) {
+      expect(available.has(add.parentId)).toBe(true);
+      if (add.nextId !== null) expect(available.has(add.nextId)).toBe(true);
+      expect(add.node.childNodes ?? []).toEqual([]);
+      available.add(add.node.id);
+    }
+    expect(labels(controller)).toEqual(['prefix', 'visible child']);
+    const rootAdd = adds[0]!;
+    const legacyNested = {
+      ...rootAdd,
+      node: {
+        ...rootAdd.node,
+        childNodes: [{ id: 9999, type: 3, textContent: 'nested-only invisible' }],
+      },
+    };
+    const legacy = {
+      ...controller,
+      getCapture: () => ({
+        ...capture,
+        events: [
+          ...capture.events.slice(0, 2),
+          {
+            ...capture.events.at(-1)!,
+            data: { ...capture.events.at(-1)!.data, adds: [legacyNested] },
+          },
+        ],
+      }),
+    };
+    expect(labels(legacy)).toEqual([]);
+  });
 
   it('reports detached byte/count statistics without cloning the event payload', () => {
     const root = element();
@@ -570,7 +639,7 @@ describe('bounded session streaming', () => {
     expect(labels(controller)).toEqual(['A', 'B', 'C', 'D']);
     const recordedNodes = playback(controller);
     expect(new Set(recordedNodes.map((node) => node.id)).size).toBe(recordedNodes.length);
-    expect(controller.getCapture().events.at(-1)!.data['adds']).toHaveLength(3);
+    expect(controller.getCapture().events.at(-1)!.data['adds']).toHaveLength(6);
     expect(controller.getCapture().events.map((event) => event.type)).toEqual([4, 2, 3]);
   });
 

@@ -1809,6 +1809,18 @@ export function startTaroDomReplayPoc(
     }
 
     const parents = new Set<TaroReplayNodeLike>();
+    const addSubtree = (node: SerializedNode, parentId: number, nextId: number | null): void => {
+      const children = 'childNodes' in node ? node.childNodes : [];
+      // rrweb rebuilds incremental additions with skipChild:true. Each descendant
+      // therefore needs its own add, including synthetic Canvas image nodes.
+      adds.push({
+        parentId,
+        nextId,
+        node: 'childNodes' in node ? { ...node, childNodes: [] } : node,
+      });
+      for (let index = children.length - 1; index >= 0; index--)
+        addSubtree(children[index]!, node.id, children[index + 1]?.id ?? null);
+    };
     for (const node of addedNodes) {
       const parent = node.parentNode;
       if (
@@ -1830,11 +1842,7 @@ export function startTaroDomReplayPoc(
         const node = children[index]!;
         if (!addedNodes.has(node)) continue;
         const next = children[index + 1];
-        adds.push({
-          parentId: idFor(parent),
-          nextId: next ? idFor(next) : null,
-          node: serializeNode(node),
-        });
+        addSubtree(serializeNode(node), idFor(parent), next ? idFor(next) : null);
         attachScrollSubtree(node);
       }
     }

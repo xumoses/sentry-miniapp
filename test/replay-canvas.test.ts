@@ -129,6 +129,36 @@ it('keeps a stable image inside an opted-in canvas before its first frame and re
   });
 });
 
+it('adds a new Canvas image as a flat synthetic child without exposing its native descendants', () => {
+  const root = node('view');
+  const h = mount(root, { recordCanvas: true });
+  const canvas = node('view', { 'data-sentry-canvas': true }, [
+    node('input', { value: 'native-descendant-secret' }),
+  ]);
+  canvas.parentNode = root;
+  root.childNodes = [canvas];
+  h.mutate([{ type: 'childList', target: root, addedNodes: [canvas] }]);
+  const capture = h.controller.getCapture();
+  const adds = capture.events.at(-1)!.data['adds'] as Array<{
+    parentId: number;
+    nextId: number | null;
+    node: SnapshotNode;
+  }>;
+  expect(adds).toHaveLength(2);
+  expect(adds[0]!.node.childNodes).toEqual([]);
+  expect(adds[1]!).toMatchObject({
+    parentId: adds[0]!.node.id,
+    nextId: null,
+    node: { tagName: 'img', childNodes: [] },
+  });
+  expect(JSON.stringify(capture)).not.toContain('native-descendant-secret');
+  expect(h.controller.recordCanvas(canvas, () => PNG)).toBe(true);
+  expect(h.controller.getCapture().events.at(-1)!.data['attributes']).toEqual([
+    { id: adds[1]!.node.id, attributes: { src: PNG } },
+  ]);
+  expect(capture.events.filter((event) => event.type === 2)).toHaveLength(1);
+});
+
 it.each(['mask', 'block', 'ignore'])(
   'never reads %s-protected pixels and never restores a frame after protection is lifted',
   (marker) => {
@@ -346,7 +376,7 @@ it('clears frames on removal or marker revocation but retains them across layout
   const added = h.controller.getCapture().events.at(-1)!.data['adds'] as Array<{
     node: SnapshotNode;
   }>;
-  const replacement = added[0]!.node.childNodes!.find((item) => item.tagName === 'img')!;
+  const replacement = added.find((item) => item.node.tagName === 'img')!.node;
   expect(replacement.id).not.toBe(initialId);
   expect(replacement.attributes?.['src']).toBeUndefined();
   expect(h.controller.recordCanvas(canvas, () => PNG)).toBe(true);
