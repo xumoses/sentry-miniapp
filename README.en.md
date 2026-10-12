@@ -217,3 +217,42 @@ Have questions or want to discuss mini program monitoring? Due to WeChat group Q
 ## License
 
 [MIT](./LICENSE)
+
+
+### Replay network headers (explicit opt-in)
+
+Pass the same policy to SDK initialization and the Replay recorder / Taro adapter:
+
+```ts
+const replayNetwork = {
+  networkDetailAllowUrls: [/^https:\/\/api\.example\.com\//],
+  networkDetailDenyUrls: ['/private'],
+  networkRequestHeaders: ['x-request-id'],
+  networkResponseHeaders: ['x-request-id'],
+};
+Sentry.init({ dsn: 'https://public@ingest.example.com/1', ...replayNetwork });
+// Also pass ...replayNetwork to startTaroDomReplayPoc or the Taro Replay adapter.
+```
+
+No URL allowlist means no headers. Allowed URLs include `content-type`,
+`content-length` and `accept`, plus direction-specific custom names, matched
+case-insensitively. Deny rules take precedence. Rules match URLs after credentials,
+query strings and fragments are removed: strings use substring matching and
+regular expressions have independent state. Configure origin/path conditions,
+preferably an anchored expression as above. Configuration is snapshotted at
+initialization; later caller mutations do not broaden collection. Each URL/name
+configuration array is limited to 100 entries; invalid or oversized deny
+configuration disables header collection.
+
+Credential header names (including authorization, cookie, token, API key,
+password, session, auth and openid families) are always omitted, even if explicitly
+listed. Each direction is limited to 20 headers, 128 ASCII characters per name,
+1024 UTF-8 bytes per value and 4096 name/value bytes combined. Oversized fields
+are omitted, not truncated. Collection only reads own data properties and accepts
+strings, finite numbers and booleans; it does not execute getters.
+
+Headers reach Replay through a temporary `replayNetworkDetails` hint and are
+absent from normal error breadcrumbs. Replay independently filters manual header
+input and still never records request/response bodies. Existing `traceNetworkBody`
+behavior for ordinary network breadcrumbs is unchanged. Audit custom header
+values before allowing them. See [network privacy boundaries](docs/taro-dom-replay-poc.md#network-headers).

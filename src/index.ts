@@ -154,3 +154,5 @@ export { defaultIntegrations, getDefaultIntegrations } from './sdk';
 export { miniappStackParser } from './stacktrace';
 
 export { pageTracingIntegration } from './integrations/pagetracing';
+
+export type { NetworkDetailOptions } from './network-details';

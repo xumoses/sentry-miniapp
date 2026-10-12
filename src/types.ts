@@ -1,3 +1,4 @@
+import type { NetworkDetailOptions } from './network-details';
 import type {
   ClientOptions,
   BaseTransportOptions,
@@ -51,15 +52,18 @@ export interface MinigameFrameRateOptions {
 /**
  * Configuration options for the Sentry Miniapp SDK.
  */
-export interface MiniappOptions extends Omit<
-  Options,
-  | 'integrations'
-  | 'defaultIntegrations'
-  | 'tracesSampler'
-  | 'beforeSend'
-  | 'beforeBreadcrumb'
-  | 'transport'
-> {
+export interface MiniappOptions
+  extends
+    Omit<
+      Options,
+      | 'integrations'
+      | 'defaultIntegrations'
+      | 'tracesSampler'
+      | 'beforeSend'
+      | 'beforeBreadcrumb'
+      | 'transport'
+    >,
+    NetworkDetailOptions {
   /** Sentry DSN */
   dsn?: string;
 

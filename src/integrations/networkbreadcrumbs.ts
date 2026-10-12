@@ -8,9 +8,17 @@ import {
   startInactiveSpan,
   withActiveSpan,
 } from '@sentry/core';
-import type { Integration, Span } from '@sentry/core';
+import type { Breadcrumb, Integration, Span } from '@sentry/core';
 import { fill } from '../helpers';
 import { sdk } from '../crossPlatform';
+import {
+  createNetworkHeaderPolicy,
+  readNetworkDataField,
+  sanitizeNetworkDetailUrl,
+  type NetworkDetailOptions,
+  type NetworkHeaderPolicy,
+  type ReplayNetworkDetails,
+} from '../network-details';
 
 /**
  * Network Breadcrumbs Integration.
@@ -29,6 +37,7 @@ export class NetworkBreadcrumbs implements Integration {
    */
   public name: string = NetworkBreadcrumbs.id;
 
+  private readonly _networkHeaderPolicy: NetworkHeaderPolicy;
   private readonly _traceNetworkBody: boolean;
   private readonly _sensitiveKeys: string[];
   private readonly _denyUrls: RegExp[];
@@ -38,7 +47,7 @@ export class NetworkBreadcrumbs implements Integration {
   private _originalHttpRequest: Function | null = null;
 
   public constructor(
-    options: {
+    options: NetworkDetailOptions & {
       traceNetworkBody?: boolean | undefined;
       /** 需要脱敏的字段名列表（不区分大小写匹配） */
       sensitiveKeys?: string[];
@@ -50,6 +59,7 @@ export class NetworkBreadcrumbs implements Integration {
       tracePropagationTargets?: Array<string | RegExp>;
     } = {},
   ) {
+    this._networkHeaderPolicy = createNetworkHeaderPolicy(options);
     this._traceNetworkBody = !!options.traceNetworkBody;
     this._sensitiveKeys = (
       options.sensitiveKeys || [
@@ -117,6 +127,7 @@ export class NetworkBreadcrumbs implements Integration {
    * Wraps the miniapp request API to capture breadcrumbs
    */
   private _createRequestWrapper(originalRequest: Function): Function {
+    const headerPolicy = this._networkHeaderPolicy;
     const traceNetworkBody = this._traceNetworkBody;
     const sanitizeBody = this._sanitizeBody.bind(this);
     const shouldDenyBodyUrl = this._shouldDenyBodyUrl.bind(this);
@@ -129,7 +140,12 @@ export class NetworkBreadcrumbs implements Integration {
       }
 
       // Do not mutate the caller's request options or callbacks.
-      options = { ...options };
+      const callerOptions = options;
+      try {
+        options = cloneRequestOptions(options);
+      } catch (_error) {
+        return originalRequest.call(this, callerOptions);
+      }
       const url = normalizeUrl(options.url);
 
       // Get the configured DSN/Transport URL from the current client
@@ -150,7 +166,7 @@ export class NetworkBreadcrumbs implements Integration {
       }
 
       // Ignore Sentry's own requests to prevent infinite loops
-      const hostMatch = url.match(/^https?:\/\/([^:/\n]+)/i);
+      const hostMatch = sanitizeNetworkDetailUrl(url).match(/^https?:\/\/([^:/\n]+)/i);
       const requestHost = hostMatch && hostMatch[1] ? hostMatch[1] : '';
       const tunnel = client?.getOptions().tunnel;
       const isSentryRequest =
@@ -177,6 +193,21 @@ export class NetworkBreadcrumbs implements Integration {
       if (enableTracePropagation && shouldPropagateTrace(url)) {
         injectTraceHeaders(options, requestSpan);
       }
+
+      const headersAllowed = headerPolicy.isAllowed(url);
+      const requestHeaders = headersAllowed ? collectHeaders(options, headerPolicy, 'request') : {};
+      const recordNetworkBreadcrumb = (breadcrumb: Breadcrumb, response: unknown): void => {
+        if (!headersAllowed) {
+          addBreadcrumb(breadcrumb);
+          return;
+        }
+        const replayNetworkDetails: ReplayNetworkDetails = {
+          url: sanitizeNetworkDetailUrl(url),
+          request_headers: requestHeaders,
+          response_headers: collectHeaders(response, headerPolicy, 'response'),
+        };
+        addBreadcrumb(breadcrumb, { replayNetworkDetails });
+      };
 
       const breadcrumbData: Record<string, any> = {
         url: sanitizeSpanNameUrl(url),
@@ -226,12 +257,15 @@ export class NetworkBreadcrumbs implements Integration {
             ? 'warning'
             : 'info';
 
-        addBreadcrumb({
-          type: 'http',
-          category: 'xhr',
-          data: breadcrumbData,
-          level,
-        });
+        recordNetworkBreadcrumb(
+          {
+            type: 'http',
+            category: 'xhr',
+            data: breadcrumbData,
+            level,
+          },
+          res,
+        );
 
         if (typeof originalSuccess === 'function') {
           return withActiveSpan(requestSpan, () => originalSuccess.apply(this, args));
@@ -250,12 +284,15 @@ export class NetworkBreadcrumbs implements Integration {
           errorMessage,
         });
 
-        addBreadcrumb({
-          type: 'http',
-          category: 'xhr',
-          data: breadcrumbData,
-          level: 'error',
-        });
+        recordNetworkBreadcrumb(
+          {
+            type: 'http',
+            category: 'xhr',
+            data: breadcrumbData,
+            level: 'error',
+          },
+          err,
+        );
 
         if (typeof originalFail === 'function') {
           return withActiveSpan(requestSpan, () => originalFail.apply(this, args));
@@ -390,16 +427,7 @@ function sanitizeSpanNameUrl(url: string): string {
     return stripDataUrlContent(url);
   }
 
-  const withoutQueryAndFragment = stripUrlQueryAndFragment(url);
-  return withoutQueryAndFragment.replace(
-    /^([a-z][a-z0-9+.-]*:\/\/)([^/?#@]+@)/i,
-    '$1[filtered]:[filtered]@',
-  );
-}
-
-function stripUrlQueryAndFragment(url: string): string {
-  const stripped = url.split(/[?#]/, 1)[0];
-  return stripped === undefined ? url : stripped;
+  return sanitizeNetworkDetailUrl(url);
 }
 
 function stripDataUrlContent(url: string): string {
@@ -412,6 +440,11 @@ function injectTraceHeaders(options: any, span: Span | null): void {
   if (!span) return;
 
   try {
+    // Leave accessor-based headers to the native API; telemetry never evaluates them.
+    for (const key of ['header', 'headers']) {
+      const descriptor = Object.getOwnPropertyDescriptor(options, key);
+      if (descriptor && !('value' in descriptor)) return;
+    }
     const traceData = getTraceData({ span });
     const sentryTrace = traceData['sentry-trace'];
     if (!sentryTrace) return;
@@ -530,9 +563,48 @@ function normalizeStatusCode(statusCode: unknown): number | undefined {
 
 function extractHost(url: string): string {
   try {
-    const hostMatch = url.match(/^https?:\/\/([^:/\n]+)/i);
+    const hostMatch = sanitizeNetworkDetailUrl(url).match(/^https?:\/\/([^:/\n]+)/i);
     return hostMatch && hostMatch[1] ? hostMatch[1] : '';
   } catch (_e) {
     return '';
   }
+}
+
+/** Preserve native options without evaluating header accessors for telemetry. */
+function cloneRequestOptions(options: Record<string, unknown>): Record<string, unknown> {
+  const clone: Record<string, unknown> = {};
+  for (const key of Object.keys(options)) {
+    if (key === 'header' || key === 'headers') {
+      const descriptor = Object.getOwnPropertyDescriptor(options, key);
+      if (descriptor)
+        Object.defineProperty(clone, key, {
+          ...descriptor,
+          ...('value' in descriptor ? { writable: true } : {}),
+          configurable: true,
+        });
+    } else {
+      Object.defineProperty(clone, key, {
+        value: options[key],
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    }
+  }
+  return clone;
+}
+
+function collectHeaders(
+  value: unknown,
+  policy: NetworkHeaderPolicy,
+  direction: 'request' | 'response',
+): Record<string, string> {
+  // Filter before merging aliases, then apply the combined per-direction budget again.
+  return policy.filterHeaders(
+    {
+      ...policy.filterHeaders(readNetworkDataField(value, 'headers'), direction),
+      ...policy.filterHeaders(readNetworkDataField(value, 'header'), direction),
+    },
+    direction,
+  );
 }

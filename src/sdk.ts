@@ -1,3 +1,4 @@
+import { snapshotNetworkOptions } from './network-details';
 import {
   getClient,
   getCurrentScope,
@@ -77,6 +78,19 @@ export function init(options: MiniappOptions = {}): MiniappClient | undefined {
     return undefined;
   }
 
+  // Snapshot new privacy fields before any spread can execute their accessors.
+  const networkDetails = snapshotNetworkOptions(options);
+  const safeOptions: Record<string, unknown> = {};
+  for (const key of Object.keys(options)) {
+    if (!Object.prototype.hasOwnProperty.call(networkDetails, key)) {
+      Object.defineProperty(safeOptions, key, {
+        value: options[key as keyof MiniappOptions],
+        enumerable: true,
+      });
+    }
+  }
+  options = { ...safeOptions, ...networkDetails } as MiniappOptions;
+
   const previous = getClient();
   if (previous instanceof MiniappClient) {
     // Cleanup is synchronous; the old transport may finish its already-started flush.
@@ -95,7 +109,10 @@ export function init(options: MiniappOptions = {}): MiniappClient | undefined {
     opts.integrations.push(new RewriteFrames());
   }
 
-  const networkOptions: Record<string, any> = { traceNetworkBody: opts.traceNetworkBody };
+  const networkOptions: Record<string, any> = {
+    traceNetworkBody: opts.traceNetworkBody,
+    ...snapshotNetworkOptions(options),
+  };
   if (opts.enableTracePropagation !== undefined) {
     networkOptions['enableTracePropagation'] = opts.enableTracePropagation;
   }

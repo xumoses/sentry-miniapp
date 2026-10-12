@@ -18,6 +18,11 @@ import {
 } from './replay-styles';
 import { boundReplayEvents } from './replay-buffer';
 import { createCheckpointRebaser } from './rebase';
+import {
+  createNetworkHeaderPolicy,
+  readNetworkDataField,
+  type NetworkDetailOptions,
+} from './network-details';
 
 export const TARO_DOM_REPLAY_POC_MARKER = 'TARO_DOM_REPLAY_POC';
 
@@ -156,7 +161,7 @@ export interface TaroReplayPocCapture {
   warnings: string[];
 }
 
-export interface StartTaroDomReplayPocOptions {
+export interface StartTaroDomReplayPocOptions extends NetworkDetailOptions {
   root: TaroReplayNodeLike;
   MutationObserver: TaroReplayMutationObserverConstructor;
   href?: string;
@@ -569,6 +574,7 @@ function cloneCapture(capture: TaroReplayPocCapture): TaroReplayPocCapture {
 export function startTaroDomReplayPoc(
   options: StartTaroDomReplayPocOptions,
 ): TaroDomReplayPocController {
+  const networkHeaderPolicy = createNetworkHeaderPolicy(options);
   if (!options.root || typeof options.root !== 'object') {
     throw new Error('[sentry-miniapp replay POC] A mounted Taro root node is required');
   }
@@ -1288,12 +1294,17 @@ export function startTaroDomReplayPoc(
     return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
   }
 
-  function networkRequestOrResponse(size: unknown): Record<string, unknown> {
+  function networkRequestOrResponse(
+    size: unknown,
+    headers: unknown,
+    allowed: boolean,
+    direction: 'request' | 'response',
+  ): Record<string, unknown> {
     const byteSize = finiteNumber(size);
     return {
-      headers: {},
+      headers: allowed ? networkHeaderPolicy.filterHeaders(headers, direction) : {},
       ...(byteSize === undefined ? {} : { size: byteSize }),
-      _meta: { warnings: ['URL_SKIPPED'] },
+      _meta: { warnings: allowed ? [] : ['URL_SKIPPED'] },
     };
   }
 
@@ -1308,6 +1319,7 @@ export function startTaroDomReplayPoc(
     let event: TaroReplayPocEvent;
 
     if (isNetwork) {
+      const allowed = networkHeaderPolicy.isAllowed(data['url']);
       const endTimestamp = timestampMs / 1_000;
       const duration = finiteNumber(data['duration']) ?? 0;
       event = {
@@ -1323,9 +1335,17 @@ export function startTaroDomReplayPoc(
             data: {
               method: typeof data['method'] === 'string' ? data['method'] : 'GET',
               statusCode: finiteNumber(data['status_code']) ?? 0,
-              request: networkRequestOrResponse(data['request_body_size'] ?? data['request_size']),
+              request: networkRequestOrResponse(
+                data['request_body_size'] ?? data['request_size'],
+                allowed ? readNetworkDataField(data, 'request_headers') : undefined,
+                allowed,
+                'request',
+              ),
               response: networkRequestOrResponse(
                 data['response_body_size'] ?? data['response_size'],
+                allowed ? readNetworkDataField(data, 'response_headers') : undefined,
+                allowed,
+                'response',
               ),
             },
           },

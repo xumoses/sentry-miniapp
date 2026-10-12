@@ -362,7 +362,7 @@ describe('NetworkBreadcrumbs Integration', () => {
     integration.setupOnce();
 
     const miniappSdk = crossPlatform.sdk() as any;
-    miniappSdk.httpRequest({
+    miniappSdk.httpRequest!({
       url: 'https://api.example.com/alipay',
       method: 'POST',
     });
@@ -396,5 +396,138 @@ describe('NetworkBreadcrumbs Integration', () => {
       baggage:
         'tenant=demo,sentry-trace_id=trace-id,sentry-public_key=public-key,sentry-sampled=true',
     });
+  });
+  it('sends permitted headers only in Replay hint for both platform aliases', () => {
+    requestMock.mockImplementation((options) =>
+      options.success({
+        statusCode: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          'Set-Cookie': 'cookie-canary',
+          'X-Response-ID': 'response-id',
+        },
+        data: { hidden: 'body-canary' },
+      }),
+    );
+    const integration = new NetworkBreadcrumbs({
+      networkDetailAllowUrls: [/^https:\/\/api\.example\.com\//],
+      networkRequestHeaders: ['X-Request-ID', 'Authorization'],
+      networkResponseHeaders: ['X-Response-ID', 'Set-Cookie'],
+    });
+    integration.setupOnce();
+    const options = {
+      url: 'https://user:password@api.example.com/items?token=query-canary',
+      header: { ACCEPT: 'application/json', Authorization: 'auth-canary' },
+      headers: { 'X-Request-ID': 'request-id' },
+    };
+    const before = JSON.stringify(options);
+    crossPlatform.sdk().request(options);
+    const [breadcrumb, hint] = jest.mocked(addBreadcrumb).mock.calls[0]!;
+    expect(hint).toEqual({
+      replayNetworkDetails: {
+        url: 'https://api.example.com/items',
+        request_headers: { 'x-request-id': 'request-id', accept: 'application/json' },
+        response_headers: { 'content-type': 'application/json', 'x-response-id': 'response-id' },
+      },
+    });
+    expect(breadcrumb.data).not.toHaveProperty('request_headers');
+    expect(breadcrumb.data).not.toHaveProperty('response_headers');
+    expect(JSON.stringify(jest.mocked(addBreadcrumb).mock.calls)).not.toMatch(
+      /auth-canary|cookie-canary|body-canary|query-canary|password/,
+    );
+    expect(JSON.stringify(options)).toBe(before);
+  });
+
+  it('captures Alipay httpRequest failure headers and preserves callbacks and return values', () => {
+    const receiver = { native: true };
+    const request = jest.fn((options) => {
+      expect(
+        options.fail.call(receiver, {
+          errorMessage: 'failed',
+          headers: { 'Content-Type': 'text/plain', 'X-Response-ID': 'failed-id' },
+        }),
+      ).toBe('failure-return');
+      expect(options.complete.call(receiver, {})).toBe('complete-return');
+      return 'request-task';
+    });
+    jest.mocked(crossPlatform.sdk).mockReturnValue({ request: requestMock, httpRequest: request });
+    new NetworkBreadcrumbs({
+      networkDetailAllowUrls: ['api.example.com'],
+      networkResponseHeaders: ['X-Response-ID'],
+    }).setupOnce();
+    const fail = jest.fn(function (this: unknown) {
+      expect(this).toBe(receiver);
+      return 'failure-return';
+    });
+    const complete = jest.fn(function (this: unknown) {
+      expect(this).toBe(receiver);
+      return 'complete-return';
+    });
+    expect(
+      crossPlatform.sdk().httpRequest!({
+        url: 'https://api.example.com/a',
+        headers: { Accept: '*/*' },
+        fail,
+        complete,
+      }),
+    ).toBe('request-task');
+    expect(jest.mocked(addBreadcrumb).mock.calls[0]![1]).toEqual({
+      replayNetworkDetails: {
+        url: 'https://api.example.com/a',
+        request_headers: { accept: '*/*' },
+        response_headers: { 'content-type': 'text/plain', 'x-response-id': 'failed-id' },
+      },
+    });
+    expect(fail).toHaveBeenCalledTimes(1);
+    expect(complete).toHaveBeenCalledTimes(1);
+  });
+
+  it('snapshots request headers at dispatch and safely ignores malformed header getters', () => {
+    let nativeOptions: any;
+    requestMock.mockImplementation((options) => {
+      nativeOptions = options;
+      return 'task';
+    });
+    new NetworkBreadcrumbs({ networkDetailAllowUrls: ['api.example.com'] }).setupOnce();
+    const header = { accept: 'original' };
+    const success = jest.fn(() => 'success-return');
+    const options = { url: 'https://api.example.com/a', header, success };
+    crossPlatform.sdk().request(options);
+    header.accept = 'later';
+    const getter = jest.fn(() => {
+      throw new Error('getter');
+    });
+    const response = Object.defineProperty({ statusCode: 200 }, 'header', { get: getter });
+    expect(nativeOptions.success(response)).toBe('success-return');
+    expect(getter).not.toHaveBeenCalled();
+    expect(jest.mocked(addBreadcrumb).mock.calls[0]![1]).toEqual({
+      replayNetworkDetails: {
+        url: options.url,
+        request_headers: { accept: 'original' },
+        response_headers: {},
+      },
+    });
+    expect(() =>
+      crossPlatform
+        .sdk()
+        .request(
+          Object.defineProperty({ url: options.url }, 'header', { get: getter, enumerable: true }),
+        ),
+    ).not.toThrow();
+    nativeOptions.success({ statusCode: 200 });
+    expect(getter).not.toHaveBeenCalled();
+    expect(jest.mocked(addBreadcrumb).mock.calls[1]![1]).toEqual({
+      replayNetworkDetails: { url: options.url, request_headers: {}, response_headers: {} },
+    });
+  });
+
+  it('keeps tracing injection working for frozen caller options without mutating them', () => {
+    new NetworkBreadcrumbs({ networkDetailAllowUrls: ['api.example.com'] }).setupOnce();
+    const header = Object.freeze({ accept: '*/*' });
+    const options = Object.freeze({ url: 'https://api.example.com/a', header });
+    crossPlatform.sdk().request(options);
+    expect(requestMock.mock.calls[0][0].header['sentry-trace']).toBe('trace-id-span-id-1');
+    expect(options.header).toEqual({ accept: '*/*' });
+    expect(requestMock.mock.calls[0][0]).not.toBe(options);
   });
 });

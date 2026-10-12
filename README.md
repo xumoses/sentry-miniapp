@@ -214,3 +214,36 @@ Sentry.captureFeedback({ message: '页面卡住了', name: '张三', email: 'zha
 ## License
 
 [MIT](./LICENSE)
+
+
+### Replay 接口 headers（显式开启）
+
+SDK 初始化和 Replay recorder / Taro adapter 必须传入同一份配置：
+
+```ts
+const replayNetwork = {
+  networkDetailAllowUrls: [/^https:\/\/api\.example\.com\//],
+  networkDetailDenyUrls: ['/private'],
+  networkRequestHeaders: ['x-request-id'],
+  networkResponseHeaders: ['x-request-id'],
+};
+Sentry.init({ dsn: 'https://public@ingest.example.com/1', ...replayNetwork });
+// 将 ...replayNetwork 同时传给 startTaroDomReplayPoc 或 Taro Replay adapter。
+```
+
+未配置允许 URL 时不记录任何 headers；允许的 URL 默认仅采集 `content-type`、
+`content-length`、`accept`，再加入对应方向的自定义白名单（不区分大小写）。
+拒绝规则优先；规则匹配已去除账号密码、query、hash 的 URL，字符串按包含匹配，
+正则使用独立状态，因此只应配置 origin/path 条件。建议使用上例中的锚定正则。
+配置在初始化时快照，后续修改原数组不会扩大采集权限；URL/名称配置数组最多 100 项，
+无效或超限的拒绝配置将关闭 headers 采集。
+
+`authorization`、cookie、token、API key、password、session、auth、openid 等敏感名称
+即使加入白名单仍会丢弃。每个方向最多 20 个字段，名称最多 128 个 ASCII 字符，
+单值最多 1024 UTF-8 字节，名称和值合计最多 4096 字节；超限字段丢弃，不截取。
+采集仅接受普通自有数据字段，不读取 getter；只支持字符串、有限数值和布尔值。
+
+headers 通过临时 `replayNetworkDetails` hint 交给 Replay，在普通错误事件面包屑中不保存。
+Replay 会再次过滤手动传入的 headers，且仍不录制请求/响应 body；原有
+`traceNetworkBody` 的普通网络面包屑策略不变。白名单字段的值仍可能含业务数据，
+应由应用审核后配置。见[网络采集与隐私边界](docs/taro-dom-replay-poc.md#network-headers)。

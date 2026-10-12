@@ -337,7 +337,9 @@ false` only for known synthetic content.
   text/input masking settings.
 - Capture, network, and DOM-attribute URLs drop query strings, fragments, URL
   user information, and `data:` payloads.
-- Request/response bodies and headers are never synthesized by the recorder.
+- Request/response bodies are never synthesized by the recorder. Headers require
+  explicit URL and header-name permission at both SDK and recorder/adapter layers;
+  see [network headers](#network-headers).
 - Normal recordings remain in memory and stop after 30 seconds, 500 events, or
   roughly 512 KiB unless the caller supplies different limits. Error-buffer
   callers can set `rollingWindowMs`; this rolls by time/event/bytes while
@@ -370,3 +372,53 @@ or arbitrary DOM-selector support.
 Before widening support, validate each platform with feature detection and a
 safe no-op fallback, then test playback plus the Breadcrumbs, Network, Tags,
 and Contexts panels in a non-production Sentry project.
+
+
+## Network headers
+
+The four option names follow [Sentry Replay network configuration](https://docs.sentry.io/platforms/javascript/session-replay/configuration/#network-details)
+and the default header set in [Sentry JavaScript 10.66.0](https://github.com/getsentry/sentry-javascript/blob/10.66.0/packages/replay-internal/src/integration.ts).
+Pass `networkDetailAllowUrls`, `networkDetailDenyUrls`, `networkRequestHeaders`
+and `networkResponseHeaders` to both SDK `init` (or a manually constructed
+`NetworkBreadcrumbs`) and `startTaroDomReplayPoc` / the Taro adapter.
+
+The default URL allowlist is empty, so even `content-type`, `content-length` and
+`accept` are omitted until explicitly enabled. Allowed URLs collect those three
+names plus exact, case-insensitive custom names for each direction. `*` is not a
+wildcard. Deny rules win. All layers match the URL after removing userinfo,
+query and fragment; string rules use substring matching, regular expressions
+use cloned state, and query/hash conditions are unsupported. Prefer anchored
+origin expressions such as `/^https:\/\/api\.example\.com\//`. Arrays and regular
+expressions are snapshotted at construction. There are at most 100 entries per
+configuration array; incomplete, malformed or oversized deny rules fail closed.
+
+The miniapp wrapper supports WeChat `header` and Alipay `headers` on both request
+and success/failure responses. It snapshots filtered request values at dispatch
+without changing caller objects. Only own, non-accessor scalar values are read;
+throwing getters/proxies are ignored by telemetry. Credential names are always
+excluded, even if explicitly allowed: auth, cookie, token, API key, password,
+secret, session, CSRF/XSRF and openid/unionid families, proxy/security headers,
+tracing headers, forwarded addresses and prototype keys. This name filter cannot
+infer secrets hidden in arbitrary custom field values: audit each allowed field.
+
+Output names are lowercase. Each direction allows at most 20 fields, 128 ASCII
+characters per name, 1024 UTF-8 bytes per value and 4096 UTF-8 name/value bytes
+combined. Values containing ASCII control characters, objects/arrays and oversized
+fields are skipped. The scanner examines at most 200 input field names. Values
+are never truncated into misleading partial identifiers.
+
+Headers are sent to `beforeAddBreadcrumb` as a temporary
+`hint.replayNetworkDetails = { url, request_headers, response_headers }`; the URL
+is already sanitized. Core error breadcrumbs contain no header dictionaries.
+An adapter must clone the breadcrumb, accept the hint only when its URL matches
+the sanitized breadcrumb URL, then reapply its own policy before forwarding to
+the recorder. The recorder independently filters `data.request_headers` and
+`data.response_headers` from `xhr`/`fetch` breadcrumbs into the performance span's
+`request.headers` / `response.headers`. This also protects manual entry points.
+
+Disallowed URLs retain the official `URL_SKIPPED` warning. Allowed URLs use an
+empty warnings array; absence of bodies does not mean URL matching failed. Replay
+still never captures bodies. The existing SDK `traceNetworkBody` option controls
+ordinary error breadcrumbs independently and is not changed by header collection.
+This work validates local serialization and transport contracts; it does not
+claim a new browser, device or remote Sentry acceptance run.

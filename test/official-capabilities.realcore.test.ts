@@ -445,3 +445,90 @@ test('closed Page constructors and existing callbacks cannot instrument the next
   expect(items('transaction')).toHaveLength(0);
   expect(items('event')[0].breadcrumbs ?? []).toEqual([]);
 });
+
+test('SDK init forwards header policy to Replay hints while real error envelopes stay header-free', async () => {
+  const originalRequest = g.wx.request;
+  const client = Sentry.init({
+    dsn: 'https://public@ingest.example.test/1',
+    enableAutoSessionTracking: false,
+    enableNetworkStatusMonitoring: false,
+    enableOfflineCache: false,
+    transport: () => ({
+      send: async (envelope) => {
+        envelopes.push(envelope);
+        return { statusCode: 200 };
+      },
+      flush: async () => true,
+    }),
+    integrations: (integrations) =>
+      integrations.filter((entry) => entry.name === 'NetworkBreadcrumbs'),
+    networkDetailAllowUrls: [/^https:\/\/api\.example\.test\//],
+    networkRequestHeaders: ['X-Request-ID', 'Authorization'],
+    networkResponseHeaders: ['X-Response-ID', 'Set-Cookie'],
+  })!;
+  const hints: any[] = [];
+  client.on('beforeAddBreadcrumb', (_breadcrumb, hint) => {
+    hints.push(hint);
+  });
+  g.wx.request({
+    url: 'https://api.example.test/items?secret=query-canary',
+    header: {
+      Accept: 'application/json',
+      'X-Request-ID': 'request-correlation-canary',
+      Authorization: 'credential-canary',
+    },
+  });
+  originalRequest.mock.calls[0][0].success({
+    statusCode: 200,
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Response-ID': 'response-correlation-canary',
+      'Set-Cookie': 'cookie-canary',
+    },
+  });
+  expect(hints[0].replayNetworkDetails).toEqual({
+    url: 'https://api.example.test/items',
+    request_headers: { accept: 'application/json', 'x-request-id': 'request-correlation-canary' },
+    response_headers: {
+      'content-type': 'application/json',
+      'x-response-id': 'response-correlation-canary',
+    },
+  });
+  Sentry.captureException(new Error('synthetic network failure'));
+  await client.flush(2000);
+  expect(items('event')[0].breadcrumbs).toHaveLength(1);
+  const json = JSON.stringify(items('event'));
+  for (const value of [
+    'request_headers',
+    'response_headers',
+    'request-correlation-canary',
+    'response-correlation-canary',
+    'credential-canary',
+    'cookie-canary',
+    'query-canary',
+  ])
+    expect(json).not.toContain(value);
+});
+
+test('actual init does not evaluate privacy configuration accessors and malformed deny fails closed', () => {
+  const originalRequest = g.wx.request;
+  const getter = jest.fn(() => {
+    throw new Error('privacy accessor');
+  });
+  const options: Sentry.MiniappOptions = {
+    dsn: 'https://public@ingest.example.test/1',
+    networkDetailAllowUrls: ['api.example.test'],
+    enableAutoSessionTracking: false,
+    enableNetworkStatusMonitoring: false,
+    integrations: (integrations) =>
+      integrations.filter((entry) => entry.name === 'NetworkBreadcrumbs'),
+  };
+  Object.defineProperty(options, 'networkDetailDenyUrls', { get: getter, enumerable: true });
+  const client = Sentry.init(options)!;
+  const hints = jest.fn();
+  client.on('beforeAddBreadcrumb', hints);
+  g.wx.request({ url: 'https://api.example.test/items', header: { Accept: 'never-captured' } });
+  originalRequest.mock.calls[0][0].success({ statusCode: 200 });
+  expect(getter).not.toHaveBeenCalled();
+  expect(hints.mock.calls[0][1]?.replayNetworkDetails).toBeUndefined();
+});
