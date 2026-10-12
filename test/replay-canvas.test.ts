@@ -343,7 +343,10 @@ it('clears frames on removal or marker revocation but retains them across layout
   h.mutate([{ type: 'childList', target: root, removedNodes: [canvas] }]);
   root.childNodes = [canvas];
   h.mutate([{ type: 'childList', target: root, addedNodes: [canvas] }]);
-  const replacement = nodes(h.controller.getCapture()).find((item) => item.tagName === 'img')!;
+  const added = h.controller.getCapture().events.at(-1)!.data['adds'] as Array<{
+    node: SnapshotNode;
+  }>;
+  const replacement = added[0]!.node.childNodes!.find((item) => item.tagName === 'img')!;
   expect(replacement.id).not.toBe(initialId);
   expect(replacement.attributes?.['src']).toBeUndefined();
   expect(h.controller.recordCanvas(canvas, () => PNG)).toBe(true);
@@ -354,6 +357,45 @@ it('clears frames on removal or marker revocation but retains them across layout
   expect(
     nodes(h.controller.getCapture()).find((item) => item.tagName === 'img')?.attributes?.['src'],
   ).toBeUndefined();
+});
+
+it('retains accepted Canvas pixels and image IDs when promoting an error buffer', () => {
+  let now = 1000;
+  const canvas = node('view', { 'data-sentry-canvas': true });
+  const { controller } = mount(node('view', {}, [canvas]), {
+    recordCanvas: true,
+    rollingWindowMs: 30000,
+    now: () => now,
+  });
+  expect(controller.recordCanvas(canvas, () => PNG)).toBe(true);
+  const prepared = controller.getCapture();
+  const imageId = nodes(prepared).find((item) => item.tagName === 'img')!.id;
+  expect(controller.promoteToSession(30000)).toBe(true);
+  now += 1000;
+  expect(controller.recordCanvas(canvas, () => PNG)).toBe(false);
+  now += 1000;
+  expect(controller.recordCanvas(canvas, () => JPEG)).toBe(true);
+  const next = controller.takeSegment();
+  expect(next.events).toHaveLength(1);
+  expect(next.events[0]!.data['attributes']).toEqual([{ id: imageId, attributes: { src: JPEG } }]);
+  expect(JSON.stringify(prepared)).toContain(PNG);
+  expect(JSON.stringify(prepared)).not.toContain(JPEG);
+});
+
+it('drains a full session before appending a permitted Canvas frame', () => {
+  const canvas = node('view', { 'data-sentry-canvas': true });
+  const segments: TaroReplayPocCapture[] = [];
+  const { controller } = mount(node('view', {}, [canvas]), {
+    recordCanvas: true,
+    maxEvents: 2,
+    onBufferFull: () => segments.push(controller.takeSegment()),
+  });
+  expect(controller.recordCanvas(canvas, () => PNG)).toBe(true);
+  expect(segments).toHaveLength(1);
+  expect(segments[0]!.events.map((event) => event.type)).toEqual([4, 2]);
+  expect(controller.getCapture().stopReason).toBeNull();
+  expect(controller.getCapture().events).toHaveLength(1);
+  expect(JSON.stringify(controller.getCapture())).toContain(PNG);
 });
 
 it.each([PNG, JPEG, WEBP])(

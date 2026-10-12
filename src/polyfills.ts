@@ -1,3 +1,6 @@
+import { getGlobalSingleton } from '@sentry/core';
+import { encodeUtf8 } from './utf8';
+
 /**
  * Polyfills for miniapp environment
  * 小程序环境的 polyfill 实现
@@ -171,6 +174,10 @@ function getGlobalObject(): any {
  */
 export function installPolyfills(): void {
   try {
+    // Binary envelopes need UTF-8 even when text-only events did not. Use the
+    // official versioned carrier hook without replacing a host global or override.
+    if (typeof TextEncoder !== 'function') getGlobalSingleton('encodePolyfill', () => encodeUtf8);
+
     const globalObj = getGlobalObject();
 
     if (!globalObj) {

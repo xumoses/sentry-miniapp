@@ -195,6 +195,12 @@ export interface StartTaroDomReplayPocOptions extends NetworkDetailOptions {
   metadata?: TaroReplayPocMetadata;
   now?: () => number;
   onEvent?: (event: TaroReplayPocEvent) => void;
+  /** Lightweight budget notification; contains no event payload or live mutable state. */
+  onBufferChange?: (
+    stats: Pick<TaroReplayPocCapture['stats'], 'eventCount' | 'approximateBytes'>,
+  ) => void;
+  /** Drain a full session segment synchronously; rolling buffers never invoke this hook. */
+  onBufferFull?: () => void;
   onStop?: (capture: TaroReplayPocCapture) => void;
 }
 
@@ -204,6 +210,8 @@ export interface TaroDomReplayPocController {
   stop(reason?: string): TaroReplayPocCapture;
   /** Drain a session segment without detaching; rolling buffers are returned without draining. */
   takeSegment(): TaroReplayPocCapture;
+  /** Clear an already captured error buffer and continue its mirror as a live session. */
+  promoteToSession(maxDurationMs: number): boolean;
   recordPageScroll(position: { scrollTop?: number; scrollLeft?: number }): boolean;
   recordViewport(size: { width: number; height: number }): boolean;
   /** Read one explicitly marked, currently mounted Canvas/container frame. */
@@ -585,7 +593,7 @@ export function startTaroDomReplayPoc(
   const maxEvents = boundedInteger(options.maxEvents, 500, 1, 100_000);
   const maxBytes = boundedInteger(options.maxBytes, 512 * 1024, 1, 20 * 1024 * 1024);
   const mutationLimit = boundedInteger(options.mutationLimit, 10_000, 1, 100_000);
-  const rollingWindowMs =
+  let rollingWindowMs =
     options.rollingWindowMs === undefined
       ? undefined
       : boundedInteger(options.rollingWindowMs, 30_000, 0, 60_000);
@@ -636,8 +644,8 @@ export function startTaroDomReplayPoc(
   const pickerListeners = new Map<TaroReplayNodeLike, (event: TaroReplayScrollEventLike) => void>();
   let lastEventTimestamp = startedAt - 1;
   let nextNodeId = SYNTHETIC_NODE_MAX_ID + 1;
-  let mutationCount = 0;
   let stopped = false;
+  let draining = false;
   let pagePosition = pageScrollPositions.get(options.root) ?? { x: 0, y: 0 };
   const rootListeners = new Map<string, (event: TaroReplayScrollEventLike) => void>();
   const lastInputValues = new WeakMap<TaroReplayNodeLike, string>();
@@ -801,10 +809,9 @@ export function startTaroDomReplayPoc(
     );
     if (
       retainedBytes > Math.min(MAX_CANVAS_FRAME_BYTES, Math.floor(maxBytes / 4)) ||
-      capture.events.length >= maxEvents ||
-      capture.stats.approximateBytes + eventSize(event) > maxBytes ||
       !futureCheckpoint ||
-      utf8ByteLength(JSON.stringify(futureCheckpoint.getSnapshot())) + metaBytes > maxBytes
+      utf8ByteLength(JSON.stringify(futureCheckpoint.getSnapshot())) + metaBytes > maxBytes ||
+      !makeEventRoom(eventSize(event))
     ) {
       warnings.add('Canvas frame skipped: recording budget exceeded');
       capture.warnings = Array.from(warnings);
@@ -1201,6 +1208,41 @@ export function startTaroDomReplayPoc(
     };
   }
 
+  function makeEventRoom(eventBytes: number): boolean {
+    const fits = (): boolean =>
+      capture.events.length < maxEvents && capture.stats.approximateBytes + eventBytes <= maxBytes;
+    if (
+      !fits() &&
+      rollingWindowMs === undefined &&
+      resources.observer &&
+      eventBytes <= maxBytes &&
+      capture.events.length &&
+      !draining &&
+      options.onBufferFull
+    ) {
+      draining = true;
+      try {
+        options.onBufferFull();
+      } catch {
+        // A failed upload scheduler must not break the application's observer callback.
+        warnings.add('Session buffer drain failed');
+        // The hook may already have detached the prefix before its queue rejects it.
+        // Never continue with increments whose delivery baseline is now uncertain.
+        stop('buffer-drain');
+      } finally {
+        draining = false;
+      }
+    }
+    return !stopped && fits();
+  }
+
+  function notifyBufferChange(): void {
+    options.onBufferChange?.({
+      eventCount: capture.stats.eventCount,
+      approximateBytes: capture.stats.approximateBytes,
+    });
+  }
+
   function addEvent(event: TaroReplayPocEvent): boolean {
     if (stopped) return false;
     const eventBytes = eventSize(event);
@@ -1229,6 +1271,7 @@ export function startTaroDomReplayPoc(
           capture.stats.approximateBytes = checkpointBytes;
           capture.stats.eventCount = capture.events.length;
           updateCanvasCheckpoint(event, eventBytes);
+          notifyBufferChange();
           options.onEvent?.(JSON.parse(JSON.stringify(event)) as TaroReplayPocEvent);
           return true;
         }
@@ -1260,13 +1303,11 @@ export function startTaroDomReplayPoc(
       }
       capture.stats.eventCount = capture.events.length;
       updateCanvasCheckpoint(event, eventBytes);
+      notifyBufferChange();
       options.onEvent?.(JSON.parse(JSON.stringify(event)) as TaroReplayPocEvent);
       return capture.events.includes(event);
     }
-    if (
-      capture.events.length >= maxEvents ||
-      capture.stats.approximateBytes + eventBytes > maxBytes
-    ) {
+    if (!makeEventRoom(eventBytes)) {
       stop('limit');
       return false;
     }
@@ -1275,6 +1316,7 @@ export function startTaroDomReplayPoc(
     capture.stats.eventCount = capture.events.length;
     capture.stats.approximateBytes += eventBytes;
     updateCanvasCheckpoint(event, eventBytes);
+    notifyBufferChange();
     options.onEvent?.(JSON.parse(JSON.stringify(event)) as TaroReplayPocEvent);
     return true;
   }
@@ -1427,7 +1469,12 @@ export function startTaroDomReplayPoc(
     if (stopped || rollingWindowMs !== undefined) return segment;
     segment.endedAt = Math.max(now(), lastEventTimestamp);
     segment.stopReason = 'segment';
-    capture.startedAt = segment.endedAt;
+    clearSegment(segment.endedAt);
+    return segment;
+  }
+
+  function clearSegment(start: number): void {
+    capture.startedAt = start;
     capture.events = [];
     capture.stats = {
       eventCount: 0,
@@ -1436,8 +1483,19 @@ export function startTaroDomReplayPoc(
       networkCount: 0,
       approximateBytes: 0,
     };
-    mutationCount = 0;
-    return segment;
+    notifyBufferChange();
+  }
+
+  function promoteToSession(durationMs: number): boolean {
+    if (stopped || rollingWindowMs === undefined) return false;
+    rollingWindowMs = undefined;
+    clearSegment(Math.max(now(), lastEventTimestamp));
+    if (resources.timer) clearTimeout(resources.timer);
+    resources.timer = setTimeout(
+      () => stop('duration'),
+      boundedInteger(durationMs, maxDurationMs, 1, 60 * 60_000),
+    );
+    return true;
   }
 
   function attachInteractions(): void {
@@ -1581,6 +1639,7 @@ export function startTaroDomReplayPoc(
         !(record.type === 'childList' && isCanvasContainer(record.target)),
     );
     if (!records.length) return;
+    let batchMutationCount = 0;
     for (const [node, state] of canvasFrames) {
       if (
         !isCanvasContainer(node) ||
@@ -1637,7 +1696,7 @@ export function startTaroDomReplayPoc(
         if (isBlocked(node) || isInsideCanvas(node)) detachScrollSubtree(node);
       }
       for (const record of records) {
-        mutationCount++;
+        batchMutationCount++;
         if (record.type === 'childList') {
           for (const node of toArray(record.removedNodes)) detachScrollSubtree(node);
           for (const node of toArray(record.addedNodes)) attachScrollSubtree(node);
@@ -1658,11 +1717,10 @@ export function startTaroDomReplayPoc(
         },
       });
       attachScrollSubtree(options.root);
-      if (!stopped) capture.stats.mutationCount = mutationCount;
+      if (!stopped) capture.stats.mutationCount += batchMutationCount;
       capture.warnings = Array.from(warnings);
       return;
     }
-    let needsStructuralCheckpoint = false;
     const texts: Array<{ id: number; value: string }> = [];
     const attributes: Array<{
       id: number;
@@ -1671,10 +1729,12 @@ export function startTaroDomReplayPoc(
     const removes: Array<{ parentId: number; id: number }> = [];
     const adds: Array<{ parentId: number; nextId: number | null; node: SerializedNode }> = [];
     const inputs: Array<{ id: number; text: string }> = [];
+    const addedNodes = new Set<TaroReplayNodeLike>();
+    const removedIds = new Set<string>();
 
     for (const record of records) {
       if (isBlocked(record.target)) continue;
-      mutationCount++;
+      batchMutationCount++;
       if (record.type === 'characterData') {
         const value = shouldMaskText(record.target)
           ? maskValue(record.target.textContent)
@@ -1727,20 +1787,55 @@ export function startTaroDomReplayPoc(
           }
         }
       } else if (record.type === 'childList') {
-        const parentId = idFor(record.target);
+        const parentId = idsByNode.get(record.target);
         for (const removedNode of toArray(record.removedNodes)) {
-          removes.push({ parentId, id: idFor(removedNode) });
-          detachScrollSubtree(removedNode);
+          const id = idsByNode.get(removedNode);
+          const key = `${parentId}:${id}`;
+          // A node added and removed within this batch was never in the mirror.
+          if (
+            parentId !== undefined &&
+            id !== undefined &&
+            serializedNodes.has(removedNode) &&
+            !removedIds.has(key)
+          ) {
+            removes.push({ parentId, id });
+            removedIds.add(key);
+          }
+          // A same-batch move keeps the existing mirror ID and native listeners.
+          if (!isInCurrentRoot(removedNode)) detachScrollSubtree(removedNode);
         }
-        for (const addedNode of toArray(record.addedNodes)) {
-          if (addedNode.nodeType === 1) needsStructuralCheckpoint = true;
-          adds.push({
-            parentId,
-            nextId: record.nextSibling ? idFor(record.nextSibling) : null,
-            node: serializeNode(addedNode),
-          });
-          attachScrollSubtree(addedNode);
-        }
+        for (const addedNode of toArray(record.addedNodes)) addedNodes.add(addedNode);
+      }
+    }
+
+    const parents = new Set<TaroReplayNodeLike>();
+    for (const node of addedNodes) {
+      const parent = node.parentNode;
+      if (
+        !parent ||
+        !isInCurrentRoot(node) ||
+        isBlocked(parent) ||
+        isInsideCanvas(node) ||
+        hasNodeAncestor(parent, (ancestor) => addedNodes.has(ancestor))
+      ) {
+        continue;
+      }
+      parents.add(parent);
+    }
+    for (const parent of parents) {
+      const children = toArray(parent.childNodes);
+      // Use final sibling order, not stale MutationRecord.nextSibling. Emit the
+      // right sibling first so every nextId exists when rrweb applies the add.
+      for (let index = children.length - 1; index >= 0; index--) {
+        const node = children[index]!;
+        if (!addedNodes.has(node)) continue;
+        const next = children[index + 1];
+        adds.push({
+          parentId: idFor(parent),
+          nextId: next ? idFor(next) : null,
+          node: serializeNode(node),
+        });
+        attachScrollSubtree(node);
       }
     }
 
@@ -1757,23 +1852,13 @@ export function startTaroDomReplayPoc(
         adds,
       },
     });
+    if (!stopped) capture.stats.mutationCount += batchMutationCount;
     for (const input of inputs)
       addEvent({
         type: RrwebEventType.IncrementalSnapshot,
         timestamp: nextTimestamp(),
         data: { source: RrwebIncrementalSource.Input, ...input, isChecked: false },
       });
-    if (!stopped) capture.stats.mutationCount = mutationCount;
-    if (needsStructuralCheckpoint && !stopped) {
-      addEvent({
-        type: RrwebEventType.FullSnapshot,
-        timestamp: nextTimestamp(),
-        data: {
-          node: fullSnapshot(),
-          initialOffset: { top: pagePosition.y, left: pagePosition.x },
-        },
-      });
-    }
   }
 
   function stop(reason = 'manual'): TaroReplayPocCapture {
@@ -1823,6 +1908,7 @@ export function startTaroDomReplayPoc(
     getCapture: () => cloneCapture(capture),
     stop,
     takeSegment,
+    promoteToSession,
     recordPageScroll,
     recordViewport,
     recordCanvas,

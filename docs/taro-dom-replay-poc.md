@@ -61,6 +61,42 @@ periodic flush cannot destroy the error-before context. `getCapture`, `takeSegme
 and `onEvent` expose detached data; modifying it cannot corrupt retained events or
 their cached byte accounting.
 
+`onBufferChange` reports only detached `eventCount` and `approximateBytes` numbers
+after accepted events or segment clearing. A process-wide adapter can combine
+these with retained-page budgets without cloning or serializing a large current
+capture on every mutation.
+
+An adapter may provide `onBufferFull` to synchronously call `takeSegment()` before
+the next event crosses a session's event/byte limit. The recorder retries that
+event after draining, preserving the DOM mutation and its node IDs. The adapter
+must queue segments in order with bounded pending bytes and stop the recording if
+that queue cannot accept another segment; it must never silently drop a prefix.
+The hook is not called during the initial checkpoint, for a single oversized event,
+or in rolling mode. Without a successful drain the existing `limit` stop remains.
+If the drain hook throws, recording stops with `buffer-drain`, including when the
+hook already removed the prefix before a queue rejected it.
+Canvas frames use the same drain opportunity, while still respecting the separate
+retained-frame and checkpoint budgets. Limits continue to count uncompressed UTF-8
+bytes; network compression does not disable memory protection.
+
+After copying and accepting an error buffer for delivery, an adapter can call
+`promoteToSession(maxDurationMs)` to clear that accepted buffer and continue the
+same live observer and mirror, with a fresh session-duration timer. It returns
+false for a stopped recorder or an already active session. No new Meta or
+FullSnapshot is emitted: the next segment refers to the accepted prefix's node IDs,
+including existing input privacy state, page scroll and Canvas images. Calling
+this before retaining the preceding buffer would discard the playback baseline.
+This mini-program optimization relies on strict ordered delivery; it is not a
+claim that the browser SDK has an identical promotion lifecycle.
+
+Compression belongs to the external lifecycle adapter. The SDK transport accepts
+binary `replay_recording` items as well as plain strings, preserves them through
+consent/offline storage, and sends the exact bytes as a native request ArrayBuffer.
+On runtimes without `TextEncoder`, SDK initialization registers Sentry core's
+official `encodePolyfill` carrier hook. The fallback matches UTF-8 encoding for
+non-ASCII metadata and substitutes U+FFFD for isolated UTF-16 surrogates without
+replacing the host's global constructors or an existing Sentry encoder override.
+
 ## Host contract
 
 Call the recorder only after Taro has mounted the current page root (for
@@ -110,6 +146,20 @@ scroll views have corresponding browser defaults. Caller CSS may override these
 defaults. This improves the recorded layout without claiming full native component
 or platform theme equivalence. Stylesheet bytes count toward the existing capture
 limits.
+
+Ordinary element insertions are serialized once in rrweb Mutation `adds`, including
+their child subtree, instead of appending another full DOM/CSS checkpoint. Privacy
+boundary changes, root portals, picker structure and viewport/rpx changes still
+receive complete snapshots where their browser representation needs rebuilding.
+Child-list batches use the final mounted virtual tree: transient added-then-removed
+nodes are omitted, new parent subtrees include their children only once, and moved
+nodes retain their IDs. Additions are emitted from right to left against surviving
+siblings, so a stale `MutationRecord.nextSibling` cannot leave a missing reference
+or reorder the replay after a sibling is removed in the same batch.
+This follows rrweb's incremental mutation format and the official Sentry approach
+of preserving the recorder across session flushes; see the upstream
+[mutation recorder](https://github.com/rrweb-io/rrweb/blob/master/packages/rrweb/src/record/mutation.ts)
+and [session buffer handling](https://github.com/getsentry/sentry-javascript/blob/10.66.0/packages/replay-internal/src/util/addEvent.ts).
 
 When a rolling buffer cannot fit both the previous checkpoint and a newly
 recorded complete snapshot, it retains the new snapshot with an aligned Meta
@@ -341,7 +391,8 @@ false` only for known synthetic content.
   explicit URL and header-name permission at both SDK and recorder/adapter layers;
   see [network headers](#network-headers).
 - Normal recordings remain in memory and stop after 30 seconds, 500 events, or
-  roughly 512 KiB unless the caller supplies different limits. Error-buffer
+  roughly 512 KiB unless the caller supplies different limits or a session adapter
+  drains the event/byte budget through `onBufferFull`. Error-buffer
   callers can set `rollingWindowMs`; this rolls by time/event/bytes while
   preserving the Meta + FullSnapshot checkpoint.
 - Non-finite numeric limits fall back to these defaults. Finite limits are
@@ -372,7 +423,6 @@ or arbitrary DOM-selector support.
 Before widening support, validate each platform with feature detection and a
 safe no-op fallback, then test playback plus the Breadcrumbs, Network, Tags,
 and Contexts panels in a non-production Sentry project.
-
 
 ## Network headers
 

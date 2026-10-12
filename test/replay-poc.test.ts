@@ -299,7 +299,7 @@ describe('Taro DOM Replay POC', () => {
     const replayId = controller.getCapture().replayId;
     text.textContent = 'current';
     root.styleText = 'color:blue';
-    const child = element('view', 'added', {}, [textNode('added child', 'added-text')]);
+    const child = element('root-portal', 'added', {}, [textNode('added child', 'added-text')]);
     root.childNodes?.push(child);
     child.parentNode = root;
     observer.current()?.emit([
@@ -863,7 +863,7 @@ describe('Taro DOM Replay POC', () => {
     controller.stop();
   });
 
-  it('adds a full snapshot checkpoint after an element subtree is inserted', () => {
+  it('records a newly inserted subtree once as an incremental mutation', () => {
     const observer = observerHarness();
     const root = element('view', 'root-1');
     const controller = startTaroDomReplayPoc({
@@ -883,8 +883,8 @@ describe('Taro DOM Replay POC', () => {
 
     const events = controller.getCapture().events;
     expect(mutationData(events[2] as TaroReplayPocEvent).adds).toHaveLength(1);
-    expect(events[3]?.type).toBe(2);
-    expect(JSON.stringify(events[3])).toContain('new child');
+    expect(events.map((event) => event.type)).toEqual([4, 2, 3]);
+    expect(JSON.stringify(events[2])).toContain('new child');
     controller.stop();
   });
 
@@ -1138,12 +1138,15 @@ describe('Taro DOM Replay POC', () => {
     observerInstance?.emit([{ type: 'childList', target: root }]);
     expect(controller.getCapture().events).toHaveLength(2);
 
+    root.childNodes = [sibling];
     observerInstance?.emit([{ type: 'childList', target: root, removedNodes: [removed] }]);
     expect(mutationData(controller.getCapture().events[2] as TaroReplayPocEvent).removes).toEqual([
       { parentId: expect.any(Number), id: removedId },
     ]);
 
     const added = textNode('added', 'added-1');
+    added.parentNode = root;
+    root.childNodes = [added, sibling];
     observerInstance?.emit([
       { type: 'childList', target: root, addedNodes: [added], nextSibling: sibling },
     ]);

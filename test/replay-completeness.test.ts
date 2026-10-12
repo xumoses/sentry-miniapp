@@ -6,8 +6,10 @@ import {
   type TaroReplayNodeLike,
   type TaroReplayScrollEventLike,
   type TaroReplayPocEvent,
+  type TaroReplayPocCapture,
 } from '../src/replay-poc';
 import { boundReplayEvents } from '../src/replay-buffer';
+import { createCheckpointRebaser } from '../src/rebase';
 
 let serial = 0;
 interface Node extends TaroReplayNodeLike {
@@ -394,7 +396,7 @@ describe('Replay privacy and supported native events', () => {
     expect(restarted.getCapture().events[1]?.data['initialOffset']).toEqual({ top: 420, left: 12 });
   });
 
-  it('preserves action history when a modal checkpoint still fits the rolling window and limits', () => {
+  it('preserves action history and adds a regular modal without a redundant checkpoint', () => {
     let now = 1000;
     const root = element();
     const h = harness(root);
@@ -413,7 +415,7 @@ describe('Replay privacy and supported native events', () => {
     h.mutate([{ type: 'childList', target: root, addedNodes: [modal] }]);
     const capture = controller.getCapture();
     expect(json(capture)).toContain('open modal');
-    expect(capture.events.filter((event) => event.type === 2)).toHaveLength(2);
+    expect(capture.events.filter((event) => event.type === 2)).toHaveLength(1);
     const detached = controller.getCapture();
     detached.events[0]!.data['href'] = 'caller mutation';
     expect(json(controller.getCapture())).not.toContain('caller mutation');
@@ -437,6 +439,294 @@ describe('Replay privacy and supported native events', () => {
       capture.events.reduce((sum, event) => sum + Buffer.byteLength(json(event)), 0),
     );
     expect(capture.events).toHaveLength(102);
+  });
+});
+
+describe('bounded session streaming', () => {
+  interface PlaybackNode {
+    id: number;
+    attributes?: Record<string, unknown>;
+    childNodes?: PlaybackNode[];
+    textContent?: string;
+  }
+  function playback(controller: ReturnType<typeof startTaroDomReplayPoc>): PlaybackNode[] {
+    const events = controller.getCapture().events;
+    const state = createCheckpointRebaser(events[1]!);
+    events.slice(2).forEach((event) => state.apply(event));
+    const nodes: PlaybackNode[] = [];
+    const visit = (node: PlaybackNode): void => {
+      nodes.push(node);
+      node.childNodes?.forEach(visit);
+    };
+    visit(state.getSnapshot().data['node'] as PlaybackNode);
+    return nodes;
+  }
+  function labels(controller: ReturnType<typeof startTaroDomReplayPoc>): string[] {
+    return playback(controller)
+      .filter((node) => node.textContent && !node.textContent.startsWith('html,body'))
+      .map((node) => node.textContent!);
+  }
+
+  it('reports detached byte/count statistics without cloning the event payload', () => {
+    const root = element();
+    const h = harness(root);
+    const reported: Array<{ eventCount: number; approximateBytes: number }> = [];
+    const controller = start({
+      root,
+      MutationObserver: h.MutationObserver,
+      onBufferChange: (stats) => {
+        reported.push({ ...stats });
+        stats.eventCount = 0;
+        stats.approximateBytes = 0;
+      },
+    });
+    const initial = controller.getCapture();
+    expect(reported.at(-1)).toEqual({
+      eventCount: initial.stats.eventCount,
+      approximateBytes: initial.stats.approximateBytes,
+    });
+    expect(initial.stats.eventCount).toBe(2);
+    controller.recordPageScroll({ scrollTop: 123 });
+    expect(reported.at(-1)!.eventCount).toBe(3);
+    controller.takeSegment();
+    expect(reported.at(-1)).toEqual({ eventCount: 0, approximateBytes: 0 });
+  });
+
+  it('omits a subtree added and removed before the observer batch finishes', () => {
+    const root = element();
+    const h = harness(root);
+    const controller = start({ root, MutationObserver: h.MutationObserver, maskAllText: false });
+    const transient = element('view', {}, [text('TRANSIENT')]);
+    transient.parentNode = root;
+    h.mutate([
+      { type: 'childList', target: root, addedNodes: [transient] },
+      { type: 'childList', target: root, removedNodes: [transient] },
+    ]);
+    expect(labels(controller)).toEqual([]);
+    expect(json(controller.getCapture())).not.toContain('TRANSIENT');
+    expect(controller.getCapture().events.map((event) => event.type)).toEqual([4, 2]);
+  });
+
+  it('uses the surviving next sibling when the original nextSibling was removed in the batch', () => {
+    const a = element('view', {}, [text('A')]);
+    const b = element('view', {}, [text('B')]);
+    const root = element('view', {}, [a, b]);
+    const h = harness(root);
+    const controller = start({ root, MutationObserver: h.MutationObserver, maskAllText: false });
+    const x = element('view', {}, [text('X')]);
+    x.parentNode = root;
+    root.childNodes = [x, b];
+    h.mutate([
+      { type: 'childList', target: root, addedNodes: [x], nextSibling: a },
+      { type: 'childList', target: root, removedNodes: [a] },
+    ]);
+    expect(labels(controller)).toEqual(['X', 'B']);
+    expect(controller.getCapture().events.map((event) => event.type)).toEqual([4, 2, 3]);
+  });
+
+  it('normalizes same-batch moves across parents while preserving IDs and final sibling order', () => {
+    const a = element('view', {}, [text('A')]);
+    const b = element('view', {}, [text('B')]);
+    const c = element('view', {}, [text('C')]);
+    const left = element('view', {}, [a]);
+    const right = element('view', {}, [b, c]);
+    const root = element('view', {}, [left, right]);
+    const h = harness(root);
+    const controller = start({ root, MutationObserver: h.MutationObserver, maskAllText: false });
+    const initialIds = new Map(playback(controller).map((node) => [node.textContent, node.id]));
+    left.childNodes = [b];
+    b.parentNode = left;
+    right.childNodes = [c, a];
+    a.parentNode = right;
+    h.mutate([
+      { type: 'childList', target: left, removedNodes: [a] },
+      { type: 'childList', target: right, addedNodes: [a], nextSibling: b },
+      { type: 'childList', target: right, removedNodes: [b] },
+      { type: 'childList', target: left, addedNodes: [b] },
+    ]);
+    expect(labels(controller)).toEqual(['B', 'C', 'A']);
+    for (const node of playback(controller).filter((node) =>
+      ['A', 'B', 'C'].includes(node.textContent!),
+    ))
+      expect(node.id).toBe(initialIds.get(node.textContent));
+    expect(controller.getCapture().events.map((event) => event.type)).toEqual([4, 2, 3]);
+  });
+
+  it('orders adjacent additions from separate records and includes a nested addition only once', () => {
+    const d = element('view', {}, [text('D')]);
+    const root = element('view', {}, [d]);
+    const h = harness(root);
+    const controller = start({ root, MutationObserver: h.MutationObserver, maskAllText: false });
+    const a = element('view', {}, [text('A')]);
+    const b = element('view', {}, [text('B')]);
+    const c = element('view', {}, [text('C')]);
+    root.childNodes = [a, b, c, d];
+    for (const node of [a, b, c]) node.parentNode = root;
+    h.mutate([
+      { type: 'childList', target: root, addedNodes: [a, b], nextSibling: d },
+      { type: 'childList', target: root, addedNodes: [c], nextSibling: d },
+      { type: 'childList', target: b, addedNodes: b.childNodes! },
+    ]);
+    expect(labels(controller)).toEqual(['A', 'B', 'C', 'D']);
+    const recordedNodes = playback(controller);
+    expect(new Set(recordedNodes.map((node) => node.id)).size).toBe(recordedNodes.length);
+    expect(controller.getCapture().events.at(-1)!.data['adds']).toHaveLength(3);
+    expect(controller.getCapture().events.map((event) => event.type)).toEqual([4, 2, 3]);
+  });
+
+  it('keeps sibling order and masks added inputs without a repairing full snapshot', () => {
+    const previous = element('view', {}, [text('previous')]);
+    const next = element('view', {}, [text('next')]);
+    const root = element('view', {}, [previous, next]);
+    const h = harness(root);
+    const controller = start({ root, MutationObserver: h.MutationObserver, maskAllText: false });
+    const inserted = element('view', {}, [
+      text('inserted'),
+      element('input', { type: 'password', value: 'added-secret' }),
+    ]);
+    inserted.parentNode = root;
+    root.childNodes = [previous, inserted, next];
+    h.mutate([{ type: 'childList', target: root, addedNodes: [inserted], nextSibling: next }]);
+    root.childNodes = [inserted, next];
+    h.mutate([{ type: 'childList', target: root, removedNodes: [previous] }]);
+    const events = controller.getCapture().events;
+    expect(events.map((event) => event.type)).toEqual([4, 2, 3, 3]);
+    expect(json(events)).not.toContain('added-secret');
+    const finalState = createCheckpointRebaser(events[1]!);
+    events.slice(2).forEach((event) => finalState.apply(event));
+    const playback = json(finalState.getSnapshot());
+    expect(playback).not.toContain('previous');
+    expect(playback.indexOf('inserted')).toBeLessThan(playback.indexOf('"next"'));
+    expect(playback).toContain('************');
+  });
+
+  it('keeps a CSS-heavy checkpoint once while additions stream across bounded segments', () => {
+    const root = element();
+    const h = harness(root);
+    const segments: TaroReplayPocCapture[] = [];
+    const controller = start({
+      root,
+      MutationObserver: h.MutationObserver,
+      maskAllText: false,
+      stylesheet: '/*' + 'x'.repeat(480000) + '*/',
+      onBufferFull: () => segments.push(controller.takeSegment()),
+    });
+    for (let index = 0; index < 40; index++) {
+      const row = element('view', {}, [text(`row-${index}:` + 'x'.repeat(1800))]);
+      row.parentNode = root;
+      root.childNodes!.push(row);
+      h.mutate([{ type: 'childList', target: root, addedNodes: [row] }]);
+    }
+    expect(controller.getCapture().stopReason).toBeNull();
+    segments.push(controller.takeSegment());
+    expect(segments).toHaveLength(2);
+    const events = segments.flatMap((segment) => segment.events);
+    expect(events.filter((event) => event.type === 2)).toHaveLength(1);
+    expect(events.filter((event) => event.type === 3)).toHaveLength(40);
+    expect(segments.reduce((total, segment) => total + segment.stats.mutationCount, 0)).toBe(40);
+    for (const segment of segments) {
+      expect(segment.stats.approximateBytes).toBeLessThanOrEqual(512 * 1024);
+      expect(segment.stats.approximateBytes).toBe(
+        segment.events.reduce((sum, event) => sum + Buffer.byteLength(json(event)), 0),
+      );
+    }
+    const reconstructed = createCheckpointRebaser(events[1]!);
+    events.slice(2).forEach((event) => reconstructed.apply(event));
+    const finalState = json(reconstructed.getSnapshot());
+    for (let index = 0; index < 40; index++) expect(finalState).toContain(`row-${index}:`);
+    expect(events.slice(2).every((event) => Buffer.byteLength(json(event)) < 3000)).toBe(true);
+  });
+
+  it('promotes the error buffer without rebuilding IDs, privacy state or the observer', () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(1000);
+    const input = element('input', { value: 'private-value', type: 'password' });
+    const root = element('view', {}, [input]);
+    const h = harness(root);
+    const controller = start({
+      root,
+      MutationObserver: h.MutationObserver,
+      rollingWindowMs: 30000,
+      maxDurationMs: 100,
+      maskInputValues: false,
+    });
+    h.emit('input', { target: input, detail: { value: 'before-promotion' } });
+    const prepared = controller.getCapture();
+    const inputId = prepared.events.at(-1)!.data['id'];
+    jest.advanceTimersByTime(50);
+    expect(controller.promoteToSession(200)).toBe(true);
+    expect(controller.getCapture().events).toEqual([]);
+    expect(controller.getCapture().replayId).toBe(prepared.replayId);
+    input.props['type'] = 'text';
+    h.mutate([{ type: 'attributes', target: input, attributeName: 'type' }]);
+    h.emit('input', { target: input, detail: { value: 'after-promotion' } });
+    controller.recordPageScroll({ scrollTop: 123 });
+    const after = controller.takeSegment();
+    expect(after.events.some((event) => event.type === 2 || event.type === 4)).toBe(false);
+    expect(after.events.find((event) => event.data['source'] === 5)?.data['id']).toBe(inputId);
+    expect(json(after)).not.toContain('after-promotion');
+    expect(after.events.at(-1)!.data).toMatchObject({ source: 3, id: 1, y: 123 });
+    expect(controller.getCapture().events).toEqual([]);
+    jest.advanceTimersByTime(60);
+    expect(controller.getCapture().stopReason).toBeNull();
+    jest.advanceTimersByTime(140);
+    expect(controller.getCapture().stopReason).toBe('duration');
+    expect(controller.promoteToSession(100)).toBe(false);
+    expect(json(prepared)).not.toContain('before-promotion');
+  });
+
+  it('never drains an incomplete initial checkpoint, rolling buffer, or oversized event', () => {
+    const drain = jest.fn();
+    const root = element('view', {}, [text('small')]);
+    const h = harness(root);
+    const initial = start({
+      root,
+      MutationObserver: h.MutationObserver,
+      maxEvents: 1,
+      onBufferFull: drain,
+    });
+    expect(initial.getCapture().stopReason).toBe('limit');
+    const rolling = start({
+      root,
+      MutationObserver: h.MutationObserver,
+      maxEvents: 2,
+      rollingWindowMs: 30000,
+      onBufferFull: drain,
+    });
+    rolling.addBreadcrumb({ category: 'ui.click' });
+    expect(rolling.getCapture().stopReason).toBeNull();
+    rolling.stop();
+    const oversized = start({
+      root,
+      MutationObserver: h.MutationObserver,
+      maxBytes: 8192,
+      maskAllText: false,
+      onBufferFull: drain,
+    });
+    const child = root.childNodes![0]!;
+    child.textContent = 'x'.repeat(10000);
+    h.mutate([{ type: 'characterData', target: child }]);
+    expect(oversized.getCapture().stopReason).toBe('limit');
+    expect(drain).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('stops when the scheduler throws after draining: %s', (afterDrain) => {
+    const root = element();
+    const h = harness(root);
+    const controller = start({
+      root,
+      MutationObserver: h.MutationObserver,
+      maxEvents: 2,
+      onBufferFull: () => {
+        if (afterDrain) controller.takeSegment();
+        throw new Error('scheduler failed');
+      },
+    });
+    expect(() => controller.addBreadcrumb({ category: 'ui.click' })).not.toThrow();
+    expect(controller.getCapture().stopReason).toBe('buffer-drain');
+    expect(controller.getCapture().events.map((event) => event.type)).toEqual(
+      afterDrain ? [] : [4, 2],
+    );
   });
 });
 
