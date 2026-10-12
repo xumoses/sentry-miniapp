@@ -142,6 +142,9 @@ For per-page / per-scenario sampling use the `tracesSampler` callback (it overri
 
 For privacy-compliance flows, initialize with `requireConsent: true`: before consent the SDK keeps collecting but sends no network requests, storing events locally. Call `Sentry.setConsent(true)` after the user agrees, or `Sentry.setConsent(false)` if consent is revoked.
 
+Errors and Replay share one bounded offline queue. Online Replay waits for actual request acknowledgement, preventing consecutive large segments from evicting each other within the 900 KiB storage budget. `flush(timeout)` covers pending and persisted work. See [offline delivery](./docs/offline-delivery.md) for restart, rate-limit and close boundaries.
+
+
 ---
 
 ## 🗺️ Source Map
@@ -256,3 +259,20 @@ absent from normal error breadcrumbs. Replay independently filters manual header
 input and still never records request/response bodies. Existing `traceNetworkBody`
 behavior for ordinary network breadcrumbs is unchanged. Audit custom header
 values before allowing them. See [network privacy boundaries](docs/taro-dom-replay-poc.md#network-headers).
+
+### System information and developer tools
+
+Error events and Taro Replay share the defaults from
+`MiniappClient.getRuntimeContexts()`. Real iOS, Android and desktop WeChat clients
+continue to use miniapp APIs. Emulated phone/system/screen fields belong in
+`miniapp_simulator`, with `device.simulator: true`. Verified WeChat DevTools may
+read Client Hints with a shared 200 ms deadline to identify the macOS host version.
+Missing or timed-out hints keep only a confirmed host name; simulated iOS and
+reduced/frozen user-agent versions are never used as the host OS version. This is
+a guarded miniapp implementation, not a built-in Sentry 10.66.0 integration.
+
+`browser` identifies the WeChat/DevTools host, not its WebView engine. Host,
+base-library and miniapp versions remain separate. `enableSystemInfo: false`
+skips collection in this path, and explicit scope/event contexts override the
+defaults. The public method returns independent technical defaults, without user
+or account identifiers. See [runtime context sources and fallback boundaries](docs/runtime-contexts.md).

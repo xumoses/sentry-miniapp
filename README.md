@@ -139,6 +139,9 @@ Sentry.setConsent(true);
 
 国内小程序 / 小游戏合规场景可在初始化时设置 `requireConsent: true`：同意前 SDK 照常采集但不发网络，事件先入本地缓冲；用户同意后调用 `Sentry.setConsent(true)` 补发，撤回同意时调用 `Sentry.setConsent(false)` 重新闸断。
 
+默认传输将错误与 Replay 放在同一个有界离线队列中；在线 Replay 等待实际请求确认，避免连续大段在 900 KiB 缓存内相互淘汰。`flush(timeout)` 覆盖待发与持久化积压。恢复边界、限流与关闭语义见[离线交付说明](./docs/offline-delivery.md)。
+
+
 ---
 
 ## 🗺️ Source Map
@@ -247,3 +250,17 @@ headers 通过临时 `replayNetworkDetails` hint 交给 Replay，在普通错误
 Replay 会再次过滤手动传入的 headers，且仍不录制请求/响应 body；原有
 `traceNetworkBody` 的普通网络面包屑策略不变。白名单字段的值仍可能含业务数据，
 应由应用审核后配置。见[网络采集与隐私边界](docs/taro-dom-replay-poc.md#network-headers)。
+
+### 系统信息与开发者工具
+
+错误事件和 Taro Replay 共用 `MiniappClient.getRuntimeContexts()` 的系统信息默认值。
+真机 iOS、Android 和桌面微信继续使用小程序 API；开发者工具的模拟 iPhone、系统版本和
+屏幕参数写入 `miniapp_simulator`，`device.simulator: true` 明确标记模拟环境。
+已确认的微信开发者工具才读取有 200 ms 上限的 Client Hints；macOS 宿主版本来自该能力，
+缺失或超时只保留可确认的名称，不拿模拟 iOS 或冻结 UA 版本填充宿主系统。
+这不是 Sentry 10.66.0 内置的集成，而是小程序环境中的独立守卫实现。
+
+`browser` 表示微信或微信开发者工具宿主，不代表 WebView 内核；微信宿主、基础库和小程序
+自身版本分别保存。`enableSystemInfo: false` 跳过本路径采集，显式 scope/event context
+优先于默认值。公开方法仅返回技术默认值副本，不含用户或账号标识。
+详见[系统上下文来源与降级边界](docs/runtime-contexts.md)。

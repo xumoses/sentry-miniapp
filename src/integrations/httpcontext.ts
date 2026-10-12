@@ -39,18 +39,26 @@ export class HttpContext implements Integration {
 
     event.contexts = {
       ...event.contexts,
-      runtime: {
-        name: 'miniapp',
-        version: miniappVersion,
-        ...(event.contexts?.['runtime'] || {}),
-      },
-      app: {
-        app_identifier: account.appId,
-        name: account.appId,
-        version: account.version,
-        app_version: account.version,
-        ...(event.contexts?.['app'] || {}),
-      },
+      ...(event.contexts?.['runtime'] !== null
+        ? {
+            runtime: {
+              name: 'miniapp',
+              version: miniappVersion,
+              ...(event.contexts?.['runtime'] || {}),
+            },
+          }
+        : {}),
+      ...(event.contexts?.['app'] !== null
+        ? {
+            app: {
+              app_identifier: account.appId,
+              name: account.appId,
+              version: account.version,
+              app_version: account.version,
+              ...(event.contexts?.['app'] || {}),
+            },
+          }
+        : {}),
     };
 
     return event;
@@ -61,7 +69,7 @@ export class HttpContext implements Integration {
    */
   private _getMiniappVersion(): string {
     const sys = getSystemInfo();
-    return sys?.SDKVersion || sys?.version || 'unknown';
+    return sys?.SDKVersion || 'unknown';
   }
 }
 

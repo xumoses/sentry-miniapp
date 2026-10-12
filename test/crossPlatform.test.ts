@@ -614,3 +614,69 @@ describe('CrossPlatform', () => {
     });
   });
 });
+
+describe('independent system API fallbacks', () => {
+  beforeEach(async () => {
+    (await import('../src/crossPlatform')).resetPlatformCache();
+  });
+  it('one failed API does not discard valid device/base/window fields', async () => {
+    const legacy = {
+      system: 'Android 15',
+      platform: 'android',
+      brand: 'Synthetic',
+      model: 'Device',
+      version: 'stale-host',
+      SDKVersion: 'stale-base',
+    };
+    (global as any).wx = {
+      getAppBaseInfo: () => ({ version: '8.0.5', SDKVersion: '3.7.12', language: 'en' }),
+      getDeviceInfo: () => {
+        throw new Error('unavailable');
+      },
+      getWindowInfo: () => ({ screenWidth: 400, screenHeight: 800 }),
+      getAppAuthorizeSetting: () => {
+        throw new Error('unavailable');
+      },
+      getSystemSetting: () => null,
+      getSystemInfoSync: () => legacy,
+    };
+    const { getSystemInfo } = await import('../src/crossPlatform');
+    expect(getSystemInfo()).toEqual(
+      expect.objectContaining({
+        system: 'Android 15',
+        screenWidth: 400,
+        version: '8.0.5',
+        SDKVersion: '3.7.12',
+      }),
+    );
+    expect(legacy.version).toBe('stale-host');
+  });
+
+  it('malformed/accessor fields cannot erase valid sibling fields or invent SDKVersion', async () => {
+    const data = Object.freeze({ system: 'macOS 27.0.1', platform: 'mac', version: '4.0.0' });
+    const device = Object.defineProperty({ brand: 'Synthetic', model: 'Device' }, 'system', {
+      enumerable: true,
+      get() {
+        throw new Error('unavailable');
+      },
+    });
+    (global as any).wx = {
+      getAppBaseInfo: () => data,
+      getDeviceInfo: () => device,
+      getWindowInfo: () => ['invalid'],
+      getSystemSetting: () => {
+        throw new Error('unavailable');
+      },
+    };
+    const { getSystemInfo } = await import('../src/crossPlatform');
+    expect(getSystemInfo()).toEqual({
+      system: 'macOS 27.0.1',
+      platform: 'mac',
+      version: '4.0.0',
+      brand: 'Synthetic',
+      model: 'Device',
+    });
+    expect(getSystemInfo()?.SDKVersion).toBeUndefined();
+    expect(data).not.toHaveProperty('SDKVersion');
+  });
+});

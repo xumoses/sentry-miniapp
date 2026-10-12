@@ -156,3 +156,5 @@ export { miniappStackParser } from './stacktrace';
 export { pageTracingIntegration } from './integrations/pagetracing';
 
 export type { NetworkDetailOptions } from './network-details';
+
+export type { MiniappRuntimeContexts } from './runtime-contexts';

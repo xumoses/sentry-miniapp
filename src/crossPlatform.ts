@@ -219,76 +219,50 @@ const getAppName = (): AppName => {
  * 故由 getSystemInfo() 记忆化包裹，避免被多处 context（client/httpcontext 等）反复重算。
  */
 const computeSystemInfo = (): SystemInfo | null => {
-  try {
-    const currentSdk = getSDK();
-    const result: any = {};
-    let hasNewApi = false;
-
-    // 1. 基础信息
-    if (currentSdk.getAppBaseInfo) {
-      const baseInfo = currentSdk.getAppBaseInfo();
-      Object.assign(result, baseInfo);
-      hasNewApi = true;
-    }
-
-    // 2. 窗口信息
-    if (currentSdk.getWindowInfo) {
-      const windowInfo = currentSdk.getWindowInfo();
-      Object.assign(result, windowInfo);
-      hasNewApi = true;
-    }
-
-    // 3. 设备信息
-    if (currentSdk.getDeviceInfo) {
-      const deviceInfo = currentSdk.getDeviceInfo();
-      Object.assign(result, deviceInfo);
-      hasNewApi = true;
-    }
-
-    // 4. 授权设置 (需要转换类型)
-    if (currentSdk.getAppAuthorizeSetting) {
-      const authSetting = currentSdk.getAppAuthorizeSetting();
-      result.albumAuthorized = authSetting.albumAuthorized === 'authorized';
-      result.cameraAuthorized = authSetting.cameraAuthorized === 'authorized';
-      result.locationAuthorized = authSetting.locationAuthorized === 'authorized';
-      result.microphoneAuthorized = authSetting.microphoneAuthorized === 'authorized';
-      result.notificationAuthorized = authSetting.notificationAuthorized === 'authorized';
-    }
-
-    // 5. 系统设置
-    if (currentSdk.getSystemSetting) {
-      const sysSetting = currentSdk.getSystemSetting();
-      Object.assign(result, sysSetting);
-    }
-
-    // 新 API 须至少返回一个核心设备身份字段（brand/model/system）才采纳。部分非微信端
-    //「方法存在却返回空壳 {}」，此时三者皆空 → 回退旧 getSystemInfoSync 取真实数据，
-    // 避免产出全 unknown 的设备信息。
-    const newApiUsable = hasNewApi && !!(result.brand || result.model || result.system);
-    if (newApiUsable) {
-      return result as SystemInfo;
-    }
-
-    // 兜底使用旧的 API（已弃用但保持兼容性）
-    if (currentSdk.getSystemInfoSync) {
-      const syncInfo = currentSdk.getSystemInfoSync();
-      // 支付宝小程序等平台，版本信息可能叫 version 而不是 SDKVersion
-      if (!syncInfo.SDKVersion && syncInfo.version) {
-        syncInfo.SDKVersion = syncInfo.version;
+  const currentSdk = getSDK();
+  const result: Record<string, unknown> = {};
+  const invoke = (name: keyof SDK): Record<string, unknown> => {
+    try {
+      const method = currentSdk[name];
+      if (typeof method !== 'function') return {};
+      const value = method.call(currentSdk);
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+      // Copy fields independently: one unexpected accessor cannot discard another API.
+      const copy: Record<string, unknown> = {};
+      for (const key of Object.keys(value)) {
+        try {
+          Object.defineProperty(copy, key, { value: value[key], enumerable: true });
+        } catch {
+          /* unavailable field */
+        }
       }
-      return syncInfo as SystemInfo;
+      return copy;
+    } catch {
+      return {};
     }
-
-    // 新 API 仅拿到部分信息、又无旧 API 兜底：部分结果仍好过 null。
-    if (hasNewApi) {
-      return result as SystemInfo;
-    }
-
-    return null;
-  } catch (error) {
-    console.warn('[sentry-miniapp] Failed to get system info:', error);
-    return null;
+  };
+  Object.assign(result, invoke('getAppBaseInfo'), invoke('getWindowInfo'), invoke('getDeviceInfo'));
+  const auth = invoke('getAppAuthorizeSetting');
+  for (const key of [
+    'albumAuthorized',
+    'cameraAuthorized',
+    'locationAuthorized',
+    'microphoneAuthorized',
+    'notificationAuthorized',
+  ]) {
+    if (key in auth) result[key] = auth[key] === 'authorized';
   }
+  Object.assign(result, invoke('getSystemSetting'));
+  if (!(result['brand'] || result['model'] || result['system'])) {
+    // Fill gaps from the legacy API, preserving usable results from modern APIs.
+    const legacy = invoke('getSystemInfoSync');
+    for (const key of Object.keys(legacy)) {
+      if (result[key] === undefined || result[key] === null || result[key] === '')
+        result[key] = legacy[key];
+    }
+  }
+  // Host version is never a substitute for the miniapp base-library SDKVersion.
+  return Object.keys(result).length ? (result as unknown as SystemInfo) : null;
 };
 
 // 系统信息记忆化：成功结果在一次会话内静态，故缓存避免每事件重算。
@@ -297,7 +271,11 @@ const computeSystemInfo = (): SystemInfo | null => {
 let _systemInfo: SystemInfo | null = null;
 const getSystemInfo = (): SystemInfo | null => {
   if (_systemInfo === null) {
-    _systemInfo = computeSystemInfo();
+    const computed = computeSystemInfo();
+    if (computed && (computed.brand || computed.model || computed.system || computed.platform)) {
+      _systemInfo = computed;
+    }
+    return computed;
   }
   return _systemInfo;
 };

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, jest } from '@jest/globals';
-import { addBreadcrumb, getCurrentScope } from '@sentry/core';
+import { addBreadcrumb, getCurrentScope, getClient } from '@sentry/core';
 import { PerformanceIntegration } from '../src/integrations/performance';
 import { getPerformanceManager, getSystemInfo, sdk } from '../src/crossPlatform';
 import type {
@@ -12,6 +12,7 @@ import type {
 jest.mock('@sentry/core', () => ({
   addBreadcrumb: jest.fn(),
   getCurrentScope: jest.fn(),
+  getClient: jest.fn(),
   startSpan: jest.fn(),
   withScope: jest.fn(),
   getCurrentHub: jest.fn(() => ({
@@ -535,9 +536,7 @@ describe('PerformanceIntegration', () => {
       const observerCallback = mockPerformanceManager.createObserver.mock.calls[0]?.[0];
       if (observerCallback) {
         // 1500ms exceeds custom 1000ms threshold but not default 3000ms
-        observerCallback([
-          { name: 'nav', entryType: 'navigation', startTime: 0, duration: 1500 },
-        ]);
+        observerCallback([{ name: 'nav', entryType: 'navigation', startTime: 0, duration: 1500 }]);
       }
 
       (customIntegration as any)._reportBufferedEntries();
@@ -617,9 +616,7 @@ describe('PerformanceIntegration', () => {
       const observerCallback = mockPerformanceManager.createObserver.mock.calls[0]?.[0];
       if (observerCallback) {
         // 80ms is below custom 100ms threshold
-        observerCallback([
-          { name: 'render', entryType: 'render', startTime: 0, duration: 80 },
-        ]);
+        observerCallback([{ name: 'render', entryType: 'render', startTime: 0, duration: 80 }]);
       }
 
       expect(mockScope.addBreadcrumb).not.toHaveBeenCalledWith(
@@ -658,9 +655,7 @@ describe('PerformanceIntegration', () => {
 
       const observerCallback = mockPerformanceManager.createObserver.mock.calls[0]?.[0];
       if (observerCallback) {
-        observerCallback([
-          { name: 'nav', entryType: 'navigation', startTime: 0, duration: 100 },
-        ]);
+        observerCallback([{ name: 'nav', entryType: 'navigation', startTime: 0, duration: 100 }]);
       }
 
       (integration as any)._reportBufferedEntries();
@@ -686,9 +681,7 @@ describe('PerformanceIntegration', () => {
 
       const observerCallback = mockPerformanceManager.createObserver.mock.calls[0]?.[0];
       if (observerCallback) {
-        observerCallback([
-          { name: 'nav', entryType: 'navigation', startTime: 0, duration: 100 },
-        ]);
+        observerCallback([{ name: 'nav', entryType: 'navigation', startTime: 0, duration: 100 }]);
       }
 
       (memIntegration as any)._reportBufferedEntries();
@@ -714,9 +707,7 @@ describe('PerformanceIntegration', () => {
 
       const observerCallback = mockPerformanceManager.createObserver.mock.calls[0]?.[0];
       if (observerCallback) {
-        observerCallback([
-          { name: 'nav', entryType: 'navigation', startTime: 0, duration: 100 },
-        ]);
+        observerCallback([{ name: 'nav', entryType: 'navigation', startTime: 0, duration: 100 }]);
       }
 
       expect(() => (memIntegration as any)._reportBufferedEntries()).not.toThrow();
@@ -882,6 +873,17 @@ describe('PerformanceIntegration', () => {
     });
   });
 
+  it('does not collect system info for user-timing detection when collection is disabled', () => {
+    (getClient as jest.Mock).mockReturnValueOnce({
+      getOptions: () => ({ enableSystemInfo: false }),
+    });
+    const count = (getSystemInfo as jest.Mock).mock.calls.length;
+    const disabled = new PerformanceIntegration({ enableUserTiming: true });
+    disabled.setupOnce();
+    expect((getSystemInfo as jest.Mock).mock.calls).toHaveLength(count);
+    disabled.cleanup();
+  });
+
   describe('observe fallback', () => {
     it('should fallback when observe fails for some entry types', () => {
       let callCount = 0;
@@ -1012,9 +1014,7 @@ describe('PerformanceIntegration', () => {
 
       const observerCallback = mockPerformanceManager.createObserver.mock.calls[0]?.[0];
       if (observerCallback) {
-        observerCallback([
-          { name: 'entry', entryType: 'navigation', startTime: 0, duration: 100 },
-        ]);
+        observerCallback([{ name: 'entry', entryType: 'navigation', startTime: 0, duration: 100 }]);
       }
 
       (integration as any)._reportBufferedEntries();

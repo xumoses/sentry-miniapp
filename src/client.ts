@@ -3,7 +3,6 @@ import {
   Scope,
   getIsolationScope,
   getCurrentScope,
-  makeOfflineTransport,
   installedIntegrations,
   eventFromUnknownInput,
   eventFromMessage as coreEventFromMessage,
@@ -19,11 +18,13 @@ import type {
   SeverityLevel,
 } from '@sentry/core';
 
-import { appName, getSystemInfo, getAccountInfo } from './crossPlatform';
+import { appName } from './crossPlatform';
+import { createRuntimeContextProvider, type MiniappRuntimeContexts } from './runtime-contexts';
 import { configureConsent } from './consent';
 import { subscribeAppLifecycle } from './appLifecycle';
 import type { MiniappOptions, ReportDialogOptions, SendFeedbackParams } from './types';
-import { createMiniappTransport, createMiniappOfflineStore } from './transports';
+import { createMiniappTransport } from './transports';
+import { createMiniappOfflineTransport } from './transports/offline';
 import { SDK_NAME, SDK_VERSION } from './version';
 import { miniappStackParser } from './stacktrace';
 
@@ -40,6 +41,7 @@ export class MiniappClient extends Client<any> {
   private _cleanupResources: () => void = () => {};
   private _stopTransport: () => void = () => {};
   private _integrationsCleaned = false;
+  private readonly _runtimeContextProvider: () => Promise<MiniappRuntimeContexts>;
   /**
    * Creates a new Miniapp SDK instance.
    *
@@ -59,15 +61,7 @@ export class MiniappClient extends Client<any> {
 
     // Each client owns its gate. A second client must not grant an older client's consent.
     let consentGranted = options.requireConsent !== true;
-    let transportClosed = false;
-    const scopedStore = (storeOptions: Parameters<typeof createMiniappOfflineStore>[0]) => {
-      const store = createMiniappOfflineStore(storeOptions);
-      return {
-        ...store,
-        shift: () =>
-          transportClosed || options.enabled === false ? Promise.resolve(undefined) : store.shift(),
-      };
-    };
+    let stopOffline = () => {};
     const storageKey = options.dsn
       ? `sentry_offline_store:${encodeURIComponent(options.dsn)}`
       : 'sentry_offline_store';
@@ -96,56 +90,58 @@ export class MiniappClient extends Client<any> {
               ...options.transportOptions,
             });
 
-        // 同意门禁：用 core offline transport 的 shouldSend 闸断网络（同意前 envelope 不发、
-        // 转入本地缓冲），setConsent(true) 后由 transport.flush() 补发。即便用户关了
-        // enableOfflineCache，requireConsent 仍需缓冲，故强制走 offline 路径；若用户传了自定义
-        // transport，也要包住它，避免合规开关被高级用法绕过。
-        if (options.requireConsent === true) {
-          return makeOfflineTransport(() => baseTransport)({
-            ...transportOptions,
-            createStore: (storeOptions: any) =>
-              scopedStore({
-                ...storeOptions,
-                storageKey,
-                // 同意前缓存用独立上限 + 冷启动优先（保留最旧）淘汰，区别于弱网那套默认值。
-                offlineCacheLimit: options.consentCacheLimit ?? 100,
-                offlineCacheMaxAge: options.consentCacheMaxAge,
-                maxBytes: options.consentCacheMaxBytes,
-                evictionMode: 'preserve-oldest',
-                onDrop: (reason, dropped) => {
-                  try {
-                    options.onConsentCacheDrop?.({ reason, dropped });
-                  } catch {
-                    /* observational */
+        if (
+          options.requireConsent === true ||
+          (!options.transport && options.enableOfflineCache !== false)
+        ) {
+          const offline = createMiniappOfflineTransport(baseTransport, {
+            shouldSend: () =>
+              (options.requireConsent !== true || consentGranted) && options.enabled !== false,
+            requireHttpStatus: !options.transport,
+            recordDroppedEvent: transportOptions.recordDroppedEvent,
+            store:
+              options.requireConsent === true
+                ? {
+                    ...transportOptions,
+                    storageKey,
+                    offlineCacheLimit: options.consentCacheLimit ?? 100,
+                    ...(options.consentCacheMaxAge !== undefined
+                      ? { offlineCacheMaxAge: options.consentCacheMaxAge }
+                      : {}),
+                    ...(options.consentCacheMaxBytes !== undefined
+                      ? { maxBytes: options.consentCacheMaxBytes }
+                      : {}),
+                    evictionMode: 'preserve-oldest',
+                    onDrop: (reason, dropped) => {
+                      try {
+                        options.onConsentCacheDrop?.({ reason, dropped });
+                      } catch {
+                        /* observational */
+                      }
+                    },
                   }
-                },
-              }),
-            // 返回 false → core 不发网络、转 shouldStore 入缓存。同意后恒为 true。
-            shouldSend: () => consentGranted,
-            flushAtStartup: true,
-          } as any);
-        }
-
-        if (!options.transport && options.enableOfflineCache !== false) {
-          return makeOfflineTransport(() => baseTransport)({
-            ...transportOptions,
-            createStore: (storeOptions: any) =>
-              scopedStore({
-                ...storeOptions,
-                storageKey,
-                offlineCacheLimit: options.offlineCacheLimit,
-                offlineCacheMaxAge: options.offlineCacheMaxAge,
-              }),
-            flushAtStartup: true, // 启动时自动重试发送
-          } as any);
+                : {
+                    ...transportOptions,
+                    storageKey,
+                    ...(options.offlineCacheLimit !== undefined
+                      ? { offlineCacheLimit: options.offlineCacheLimit }
+                      : {}),
+                    ...(options.offlineCacheMaxAge !== undefined
+                      ? { offlineCacheMaxAge: options.offlineCacheMaxAge }
+                      : {}),
+                  },
+          });
+          stopOffline = () => offline.stop();
+          return offline;
         }
 
         return baseTransport;
       },
     });
 
+    this._runtimeContextProvider = createRuntimeContextProvider(options.enableSystemInfo !== false);
     this._stopTransport = () => {
-      transportClosed = true;
+      stopOffline();
     };
     this._readConsent = () => options.requireConsent !== true || consentGranted;
     this._writeConsent = (granted) => {
@@ -244,42 +240,19 @@ export class MiniappClient extends Client<any> {
    * （scopeData.js：`event.contexts = {...scope, ...event}`），若在 super 之前写，SDK 的
    * 自动值会盖掉用户的 setContext('device'/'os'/'app')。放到 super 之后按缺失填充即可两头兼顾。
    */
-  private _fillDefaultContexts(event: Event | null): Event | null {
-    if (!event || this.getOptions().enableSystemInfo === false) {
-      return event;
+  public getRuntimeContexts(): PromiseLike<MiniappRuntimeContexts> {
+    return this._runtimeContextProvider();
+  }
+
+  private async _fillDefaultContexts(event: Event | null): Promise<Event | null> {
+    if (!event) return event;
+    const defaults = await this.getRuntimeContexts();
+    event.contexts ??= {};
+    for (const [name, value] of Object.entries(defaults)) {
+      // An explicit null is also a caller override, not permission to refill it.
+      if (event.contexts[name] === null) continue;
+      event.contexts[name] = { ...value, ...event.contexts[name] };
     }
-    const info = getSystemInfo();
-    if (!event.contexts) {
-      event.contexts = {};
-    }
-    const contexts = event.contexts;
-    contexts.device = {
-      brand: info?.brand || 'unknown',
-      model: info?.model || 'unknown',
-      screen_resolution: `${info?.screenWidth || 0}x${info?.screenHeight || 0}`,
-      language: info?.language || 'unknown',
-      version: info?.version || 'unknown',
-      system: info?.system || 'unknown',
-      platform: info?.platform || 'unknown',
-      ...contexts.device,
-    };
-    const system = String(info?.system || '');
-    const parsedSystem = /^(.*?)(?:\s+|_)(\d[\w.+_-]*)$/.exec(system);
-    contexts.os = {
-      name: parsedSystem?.[1] || system || 'unknown',
-      ...(parsedSystem?.[2] ? { version: parsedSystem[2] } : {}),
-      ...contexts.os,
-    };
-    contexts.app = {
-      app_version: getAccountInfo().version || 'unknown',
-      ...contexts.app,
-    };
-    contexts['miniapp_host'] = {
-      name: appName(),
-      version: info?.version || 'unknown',
-      sdk_version: info?.SDKVersion || 'unknown',
-      ...contexts['miniapp_host'],
-    };
     return event;
   }
 

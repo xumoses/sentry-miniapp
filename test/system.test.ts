@@ -1,35 +1,17 @@
 import { describe, it, expect, beforeEach, jest } from '@jest/globals';
-import { getCurrentScope } from '@sentry/core';
+import { getCurrentScope, getClient } from '@sentry/core';
 import { System } from '../src/integrations/system';
-import { getSystemInfo } from '../src/crossPlatform';
 
 // Mock @sentry/core
 jest.mock('@sentry/core', () => ({
   getCurrentScope: jest.fn(),
+  getClient: jest.fn(),
 }));
 
 // Mock crossPlatform
-const mockSystemInfo: any = {
-  brand: 'Apple',
-  model: 'iPhone 13',
-  pixelRatio: 3,
-  screenWidth: 390,
-  screenHeight: 844,
-  windowWidth: 390,
-  windowHeight: 844,
-  statusBarHeight: 44,
-  language: 'zh_CN',
-  version: '8.0.5',
-  system: 'iOS 15.0',
-  platform: 'ios',
-  fontSizeSetting: 16,
-  SDKVersion: '2.19.4',
-};
-
 const mockSdk: any = {};
 
 jest.mock('../src/crossPlatform', () => ({
-  getSystemInfo: jest.fn(() => mockSystemInfo),
   sdk: jest.fn(() => mockSdk),
 }));
 
@@ -48,70 +30,53 @@ describe('System', () => {
     Object.keys(mockSdk).forEach((key) => delete mockSdk[key]);
   });
 
-  describe('setupOnce', () => {
-    it('should add device context', () => {
-      const integration = new System();
-      integration.setupOnce();
-
-      expect(mockScope.setContext).toHaveBeenCalledWith(
-        'device',
-        expect.objectContaining({
-          name: 'iPhone 13',
-          model: 'iPhone 13',
-          brand: 'Apple',
-          family: 'ios',
-        }),
-      );
+  describe('shared runtime defaults', () => {
+    it('does not write system guesses into global scope at setup', () => {
+      new System().setupOnce();
+      expect(mockScope.setContext).not.toHaveBeenCalled();
+      expect(mockScope.setTag).not.toHaveBeenCalled();
     });
 
-    it('should add OS context', () => {
-      const integration = new System();
-      integration.setupOnce();
-
-      expect(mockScope.setContext).toHaveBeenCalledWith(
-        'os',
-        expect.objectContaining({
-          name: 'iOS',
-          version: '15.0',
-        }),
+    it('delegates contexts/tags to the client provider and preserves explicit fields', async () => {
+      const defaults = {
+        device: { brand: 'Synthetic', model: 'Device', language: 'en' },
+        os: { name: 'macOS', version: '27.0.1' },
+        app: { app_version: '2.4.0' },
+      };
+      const client = { getOptions: () => ({}), getRuntimeContexts: jest.fn(async () => defaults) };
+      const event = await new System().processEvent(
+        { contexts: { os: { name: 'Explicit' } }, tags: { 'app.version': 'explicit' } },
+        {},
+        client as any,
       );
+      expect(event.contexts?.os).toEqual({ name: 'Explicit', version: '27.0.1' });
+      expect(event.contexts?.device).not.toHaveProperty('arch');
+      expect(event.contexts?.os).not.toHaveProperty('kernel_version');
+      expect(event.tags?.['app.version']).toBe('explicit');
+      expect(event.tags?.['os.name']).toBe('Explicit');
+      expect(mockScope.setContext).not.toHaveBeenCalled();
+      expect(client.getRuntimeContexts).toHaveBeenCalledTimes(1);
     });
 
-    it('should add app context', () => {
-      const integration = new System();
-      integration.setupOnce();
-
-      expect(mockScope.setContext).toHaveBeenCalledWith(
-        'app',
-        expect.objectContaining({
-          app_version: '8.0.5',
-        }),
-      );
-    });
-
-    it('should add screen context', () => {
-      const integration = new System();
-      integration.setupOnce();
-
-      expect(mockScope.setContext).toHaveBeenCalledWith(
-        'screen',
-        expect.objectContaining({
-          screen_width: 390,
-          screen_height: 844,
-          screen_density: 3,
-        }),
-      );
-    });
-
-    it('should set device tags', () => {
-      const integration = new System();
-      integration.setupOnce();
-
-      expect(mockScope.setTag).toHaveBeenCalledWith('device.model', 'iPhone 13');
-      expect(mockScope.setTag).toHaveBeenCalledWith('device.brand', 'Apple');
-      expect(mockScope.setTag).toHaveBeenCalledWith('os.name', 'iOS');
-      expect(mockScope.setTag).toHaveBeenCalledWith('os.version', '15.0');
-      expect(mockScope.setTag).toHaveBeenCalledWith('language', 'zh_CN');
+    it('honors disabled system collection and fails open for unavailable providers', async () => {
+      const getRuntimeContexts = jest.fn(async () => {
+        throw new Error('unavailable');
+      });
+      const disabled = { getOptions: () => ({ enableSystemInfo: false }), getRuntimeContexts };
+      (getClient as jest.Mock).mockReturnValueOnce(disabled);
+      mockSdk.getLocation = jest.fn();
+      new System().setupOnce();
+      expect(mockSdk.getLocation).not.toHaveBeenCalled();
+      expect(await new System().processEvent({ message: 'kept' }, {}, disabled as any)).toEqual({
+        message: 'kept',
+      });
+      expect(getRuntimeContexts).not.toHaveBeenCalled();
+      expect(
+        await new System().processEvent({ message: 'kept' }, {}, {
+          getOptions: () => ({}),
+          getRuntimeContexts,
+        } as any),
+      ).toEqual({ message: 'kept' });
     });
   });
 
@@ -204,32 +169,6 @@ describe('System', () => {
 
       const integration = new System();
       expect(() => integration.setupOnce()).not.toThrow();
-    });
-  });
-
-  describe('error handling', () => {
-    it('should handle getSystemInfo returning null', () => {
-      (getSystemInfo as jest.Mock).mockReturnValueOnce(null);
-
-      const integration = new System();
-      expect(() => integration.setupOnce()).not.toThrow();
-    });
-
-    it('should handle system without OS separator', () => {
-      (getSystemInfo as jest.Mock).mockReturnValueOnce({
-        ...mockSystemInfo,
-        system: 'Android',
-      });
-
-      const integration = new System();
-      integration.setupOnce();
-
-      expect(mockScope.setContext).toHaveBeenCalledWith(
-        'os',
-        expect.objectContaining({
-          name: 'Android',
-        }),
-      );
     });
   });
 

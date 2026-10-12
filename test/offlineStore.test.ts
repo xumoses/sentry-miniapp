@@ -75,6 +75,15 @@ describe('OfflineStore', () => {
     expect(shifted2).toEqual(env1);
   });
 
+  it('clears storage after shift expires the final cached item', async () => {
+    const store = createMiniappOfflineStore({ offlineCacheMaxAge: 100 } as any);
+    mockStorage['sentry_offline_store'] = JSON.stringify([
+      { envelope: [{ event_id: 'expired' }, []], timestamp: Date.now() - 101 },
+    ]);
+    expect(await store.shift()).toBeUndefined();
+    expect(JSON.parse(mockStorage['sentry_offline_store'])).toEqual([]);
+  });
+
   describe('健壮性：损坏自愈与体积上限', () => {
     it('存储被写坏（非法 JSON）时清键自愈，之后可正常使用', async () => {
       const removeStorageSync = jest.fn((key: string) => {
@@ -104,10 +113,7 @@ describe('OfflineStore', () => {
 
     it('超出单 key 体积上限时丢弃最旧的非错误事件，保住错误事件写入', async () => {
       const big = 'x'.repeat(1024 * 1024); // 1MB，单条即超 900KB 上限
-      const bigTransaction: any = [
-        { event_id: 'big' },
-        [[{ type: 'transaction' }, { data: big }]],
-      ];
+      const bigTransaction: any = [{ event_id: 'big' }, [[{ type: 'transaction' }, { data: big }]]];
       const errorEnv: any = [{ event_id: 'err' }, [[{ type: 'event' }, { msg: 'boom' }]]];
 
       const store = createMiniappOfflineStore({ offlineCacheLimit: 50 } as any);

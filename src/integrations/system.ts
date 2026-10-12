@@ -1,7 +1,9 @@
-import { getCurrentScope, addBreadcrumb } from '@sentry/core';
-import type { Integration, IntegrationFn } from '@sentry/core';
+import { getCurrentScope, getClient, addBreadcrumb } from '@sentry/core';
+import type { Client, Event, EventHint, Integration, IntegrationFn } from '@sentry/core';
 
-import { getSystemInfo, sdk } from '../crossPlatform';
+import { sdk } from '../crossPlatform';
+import type { MiniappRuntimeContexts } from '../runtime-contexts';
+import type { MiniappOptions } from '../types';
 
 /**
  * System information integration.
@@ -24,62 +26,44 @@ export class System implements Integration {
    * @inheritDoc
    */
   public setupOnce(): void {
-    this._addSystemContext();
+    if ((getClient()?.getOptions() as MiniappOptions | undefined)?.enableSystemInfo === false)
+      return;
     this._addNetworkContext();
     this._addLocationContext();
     this._addStorageContext();
     this._checkAppUpdate();
   }
 
-  /**
-   * Add system information to context
-   */
-  private _addSystemContext(): void {
+  /** Use the owning client's defaults instead of writing stale device data into global scope. */
+  public async processEvent(event: Event, _hint: EventHint, client: Client): Promise<Event> {
+    if ((client.getOptions() as MiniappOptions).enableSystemInfo === false) return event;
+    const owner = client as Client & {
+      getRuntimeContexts?: () => PromiseLike<MiniappRuntimeContexts>;
+    };
+    if (!owner.getRuntimeContexts) return event;
     try {
-      const systemInfo = getSystemInfo();
-      if (systemInfo) {
-        const scope = getCurrentScope();
-
-        // Set device context
-        scope.setContext('device', {
-          name: systemInfo.model,
-          model: systemInfo.model,
-          brand: systemInfo.brand,
-          family: systemInfo.platform,
-          arch: systemInfo.platform,
-        });
-
-        // Set OS context
-        scope.setContext('os', {
-          name: systemInfo.system?.split(' ')[0] || 'unknown',
-          version: systemInfo.system?.split(' ')[1] || 'unknown',
-          kernel_version: systemInfo.version,
-        });
-
-        // Set app context
-        scope.setContext('app', {
-          app_name: (systemInfo as any).appName || 'unknown',
-          app_version: systemInfo.version,
-        });
-
-        // Set screen context
-        scope.setContext('screen', {
-          screen_width: systemInfo.screenWidth,
-          screen_height: systemInfo.screenHeight,
-          screen_density: systemInfo.pixelRatio,
-        });
-
-        // Set tags
-        scope.setTag('device.model', systemInfo.model);
-        scope.setTag('device.brand', systemInfo.brand);
-        scope.setTag('os.name', systemInfo.system?.split(' ')[0] || 'unknown');
-        scope.setTag('os.version', systemInfo.system?.split(' ')[1] || 'unknown');
-        scope.setTag('app.version', systemInfo.version);
-        scope.setTag('language', systemInfo.language);
+      const defaults = await owner.getRuntimeContexts();
+      event.contexts ??= {};
+      for (const [name, value] of Object.entries(defaults)) {
+        if (event.contexts[name] !== null)
+          event.contexts[name] = { ...value, ...event.contexts[name] };
       }
-    } catch (_e) {
-      // Ignore errors when getting system info
+      const tags: Record<string, string> = {};
+      for (const [key, value] of Object.entries({
+        'device.model': event.contexts['device']?.['model'],
+        'device.brand': event.contexts['device']?.['brand'],
+        'os.name': event.contexts['os']?.['name'],
+        'os.version': event.contexts['os']?.['version'],
+        'app.version': event.contexts['app']?.['app_version'],
+        language: event.contexts['device']?.['language'],
+      })) {
+        if (typeof value === 'string' && value !== 'unknown') tags[key] = value;
+      }
+      event.tags = { ...tags, ...event.tags };
+    } catch {
+      /* Optional legacy enrichment must not stop an event. */
     }
+    return event;
   }
 
   /**

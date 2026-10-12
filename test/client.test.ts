@@ -151,7 +151,6 @@ describe('MiniappClient', () => {
         model: 'iPhone',
         screen_resolution: '375x812',
         language: 'zh_CN',
-        version: '8.0.0',
         system: 'iOS 15.0',
         platform: 'ios',
       });
@@ -191,11 +190,9 @@ describe('MiniappClient', () => {
       const event = await client['_prepareEvent']({ message: 'test' }, {});
 
       expect(event?.contexts?.device).toEqual({
-        brand: 'unknown',
         model: 'iPhone',
         screen_resolution: '0x812',
         language: 'unknown',
-        version: '8.0.0',
         system: 'unknown',
         platform: 'ios',
       });
@@ -223,11 +220,8 @@ describe('MiniappClient', () => {
       const event = await client['_prepareEvent']({ message: 'test' }, {});
 
       expect(event?.contexts?.device).toEqual({
-        brand: 'unknown',
-        model: 'unknown',
         screen_resolution: '0x0',
         language: 'unknown',
-        version: 'unknown',
         system: 'unknown',
         platform: 'unknown',
       });

@@ -143,7 +143,7 @@ export interface MiniappOptions
    */
   platform?: 'wechat' | 'alipay' | 'bytedance' | 'qq' | 'swan' | 'dingtalk' | 'kuaishou';
 
-  /** Whether to enable system info collection */
+  /** Collect system defaults (default true). False also skips DevTools Client Hints and account-version reads. */
   enableSystemInfo?: boolean;
 
   /** Whether to enable user interaction breadcrumbs */

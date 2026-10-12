@@ -1,5 +1,6 @@
 import type { Envelope, OfflineStore, OfflineTransportOptions } from '@sentry/core';
 import { sdk } from '../crossPlatform';
+import { replayIdentity } from './replayIdentity';
 
 const DEFAULT_OFFLINE_CACHE_SIZE = 30;
 const DEFAULT_MAX_AGE = 86400000; // 24 小时
@@ -36,13 +37,28 @@ export interface MiniappOfflineStoreOptions extends OfflineTransportOptions {
   evictionMode?: EvictionMode;
   /** 因超限 / 过期丢弃事件时回调（用于可观测，如同意前缓存丢弃统计） */
   onDrop?: (reason: DropReason, dropped: number) => void;
+  /** @internal Scheduler requires an explicit rejection when persistence fails. */
+  strictPersistence?: boolean;
+  /** @internal Preserve Replay prefixes and notify the sender about lost dependencies. */
+  protectReplayOrder?: boolean;
+  /** @internal Individual losses, including dependent Replay suffixes. */
+  onDiscardEnvelope?: (envelope: Envelope, reason: DropReason) => void;
 }
 
 /**
  * Creates an offline store using miniapp storage API.
  * 支持事件过期淘汰、按条数 / 体积上限淘汰，以及两种淘汰策略（见 {@link EvictionMode}）。
  */
-export function createMiniappOfflineStore(options: MiniappOfflineStoreOptions): OfflineStore {
+export interface MiniappOfflineStore extends OfflineStore {
+  /** @internal Read without removing the in-flight persisted prefix. */
+  peek(): Promise<Envelope | undefined>;
+  /** @internal Remove an acknowledged/discarded envelope. */
+  remove(envelope: Envelope): Promise<void>;
+}
+
+export function createMiniappOfflineStore(
+  options: MiniappOfflineStoreOptions,
+): MiniappOfflineStore {
   // 用 ?? 而非 ||：尊重显式的 0（|| 会把 0 当成未设置而回退默认值）。
   const maxCacheSize = boundedLimit(options.offlineCacheLimit, DEFAULT_OFFLINE_CACHE_SIZE);
   const storageKey = options.storageKey || OFFLINE_STORE_KEY;
@@ -65,100 +81,150 @@ export function createMiniappOfflineStore(options: MiniappOfflineStoreOptions): 
     }
   }
 
-  /** 淘汰过期事件，返回保留下来的子集并上报丢弃数。 */
-  function evictExpired(store: CachedEnvelope[]): CachedEnvelope[] {
-    const now = Date.now();
-    const kept = store.filter((item) => now - item.timestamp < maxAge);
-    report('age', store.length - kept.length);
-    return kept;
+  function discard(store: CachedEnvelope[], index: number, reason: DropReason): number {
+    const removed = store.splice(index, 1);
+    const identity = removed[0] && replayIdentity(removed[0].envelope);
+    if (options.protectReplayOrder && identity) {
+      for (let i = store.length - 1; i >= 0; i--) {
+        const other = replayIdentity(store[i]!.envelope);
+        if (other?.id === identity.id && other.segment >= identity.segment)
+          removed.push(...store.splice(i, 1));
+      }
+    }
+    for (const item of removed) {
+      try {
+        options.onDiscardEnvelope?.(item.envelope, reason);
+      } catch {
+        /* observational */
+      }
+    }
+    return removed.length;
   }
 
-  /**
-   * 按条数上限就地淘汰，返回丢弃条数。
-   * context 区分 push（新事件在尾部）与 unshift（重试事件回插到头部）：error-priority 下分别
-   * 丢最旧 / 最新的非 error，避免 unshift 立刻把刚回插的事件淘汰掉。preserve-oldest 一律丢最新。
-   */
-  function evictByCount(store: CachedEnvelope[], context: 'push' | 'unshift'): number {
+  function evictExpired(store: CachedEnvelope[]): CachedEnvelope[] {
     let dropped = 0;
-    while (store.length > maxCacheSize) {
-      if (evictionMode === 'preserve-oldest') {
-        store.pop(); // 丢最新，保留最旧（冷启动）
-      } else if (context === 'push') {
-        const nonErrorIdx = store.findIndex((item) => !isErrorEnvelope(item.envelope));
-        if (nonErrorIdx >= 0) {
-          store.splice(nonErrorIdx, 1);
-        } else {
-          store.shift(); // 全是错误事件则丢弃最早的
-        }
-      } else {
-        const nonErrorIdx = findLastIndex(store, (item) => !isErrorEnvelope(item.envelope));
-        if (nonErrorIdx >= 0) {
-          store.splice(nonErrorIdx, 1);
-        } else {
-          store.pop();
-        }
-      }
-      dropped++;
+    for (let index = store.length - 1; index >= 0; index--) {
+      if (store[index] && Date.now() - store[index]!.timestamp >= maxAge)
+        dropped += discard(store, index, 'age');
     }
+    report('age', dropped);
+    return store;
+  }
+
+  function dropIndex(
+    store: CachedEnvelope[],
+    context: 'push' | 'unshift',
+    incoming?: Envelope,
+  ): number {
+    const identity = incoming && replayIdentity(incoming);
+    // A newly queued suffix must never evict its own required predecessor.
+    if (
+      options.protectReplayOrder &&
+      identity &&
+      context === 'push' &&
+      store.some((item) => {
+        const previous = replayIdentity(item.envelope);
+        return previous?.id === identity.id && previous.segment < identity.segment;
+      })
+    ) {
+      const index = store.findIndex((item) => item.envelope === incoming);
+      if (index >= 0) return index;
+    }
+    if (evictionMode === 'preserve-oldest') return store.length - 1;
+    if (context === 'unshift') {
+      const index = findLastIndex(store, (item) => !isErrorEnvelope(item.envelope));
+      return index >= 0 ? index : store.length - 1;
+    }
+    const index = store.findIndex((item) => !isErrorEnvelope(item.envelope));
+    return index >= 0 ? index : 0;
+  }
+
+  function evictByCount(
+    store: CachedEnvelope[],
+    context: 'push' | 'unshift',
+    incoming: Envelope,
+  ): number {
+    let dropped = 0;
+    while (store.length > maxCacheSize)
+      dropped += discard(store, dropIndex(store, context, incoming), 'count');
     return dropped;
   }
 
-  /** 写回 storage：超出字节上限时按策略丢弃再写，避免 setStorageSync 因超限整批失败。 */
-  function persist(store: CachedEnvelope[]): void {
+  function persist(
+    store: CachedEnvelope[],
+    context: 'push' | 'unshift' = 'push',
+    incoming?: Envelope,
+  ): CachedEnvelope[] {
     const storageApi = sdk().setStorageSync;
     if (!storageApi) {
-      return;
+      if (options.strictPersistence) throw new Error('Offline storage is unavailable');
+      return [];
     }
-    let working = store;
-    let serialized = serializeStore(working);
+    let serialized = serializeStore(store);
     let dropped = 0;
-    while (working.length > 0 && utf8ByteLength(serialized) > maxBytes) {
-      if (evictionMode === 'preserve-oldest') {
-        working = working.slice(0, working.length - 1); // 丢最新（末尾）
-      } else {
-        const nonErrorIdx = working.findIndex((item) => !isErrorEnvelope(item.envelope));
-        const dropIdx = nonErrorIdx >= 0 ? nonErrorIdx : 0;
-        working = working.slice(0, dropIdx).concat(working.slice(dropIdx + 1));
-      }
-      dropped++;
-      serialized = serializeStore(working);
+    while (store.length > 0 && utf8ByteLength(serialized) > maxBytes) {
+      dropped += discard(store, dropIndex(store, context, incoming), 'bytes');
+      serialized = serializeStore(store);
     }
     report('bytes', dropped);
     try {
       storageApi(storageKey, serialized);
-    } catch (_e) {
-      // ignore（已尽力压到上限内；极端单条仍超限则吞掉，不阻断主流程）
+      return store;
+    } catch (error) {
+      if (options.strictPersistence) throw error;
+      return [];
     }
   }
 
   return {
+    peek: async () => {
+      const store = getStore(storageKey, options.strictPersistence);
+      const before = store.length;
+      evictExpired(store);
+      if (before !== store.length) persist(store);
+      return store[0]?.envelope;
+    },
+    remove: async (env) => {
+      const store = getStore(storageKey, options.strictPersistence);
+      const key = JSON.stringify(env);
+      const index = store.findIndex((item) => JSON.stringify(item.envelope) === key);
+      if (index >= 0) store.splice(index, 1);
+      persist(store);
+    },
     push: async (env: Envelope): Promise<void> => {
       try {
-        const store = evictExpired(getStore(storageKey));
+        const store = evictExpired(getStore(storageKey, options.strictPersistence));
         store.push({ envelope: env, timestamp: Date.now() });
-        report('count', evictByCount(store, 'push'));
-        persist(store);
+        report('count', evictByCount(store, 'push', env));
+        const kept = persist(store, 'push', env);
+        if (options.strictPersistence && !kept.some((item) => item.envelope === env))
+          throw new Error('Offline queue capacity exceeded');
       } catch (e) {
+        if (options.strictPersistence) throw e;
         console.warn('[sentry-miniapp] Failed to push to offline store', e);
       }
     },
     unshift: async (env: Envelope): Promise<void> => {
       try {
-        const store = evictExpired(getStore(storageKey));
+        const store = evictExpired(getStore(storageKey, options.strictPersistence));
         // A failed retry must not restart the retention period indefinitely.
         store.unshift({ envelope: env, timestamp: originalTimestamps.get(env) ?? Date.now() });
-        report('count', evictByCount(store, 'unshift'));
-        persist(store);
+        report('count', evictByCount(store, 'unshift', env));
+        const kept = persist(store, 'unshift', env);
+        if (options.strictPersistence && !kept.some((item) => item.envelope === env))
+          throw new Error('Offline queue capacity exceeded');
       } catch (e) {
+        if (options.strictPersistence) throw e;
         console.warn('[sentry-miniapp] Failed to unshift to offline store', e);
       }
     },
     shift: async (): Promise<Envelope | undefined> => {
       try {
-        const before = getStore(storageKey);
+        const before = getStore(storageKey, options.strictPersistence);
+        const hadItems = before.length > 0;
         const store = evictExpired(before);
         if (store.length === 0) {
-          if (before.length > 0) {
+          if (hadItems) {
             persist(store);
           }
           return undefined;
@@ -168,6 +234,7 @@ export function createMiniappOfflineStore(options: MiniappOfflineStoreOptions): 
         persist(store);
         return item?.envelope;
       } catch (e) {
+        if (options.strictPersistence) throw e;
         console.warn('[sentry-miniapp] Failed to shift from offline store', e);
         return undefined;
       }
@@ -200,7 +267,7 @@ function findLastIndex<T>(arr: T[], predicate: (item: T) => boolean): number {
   return -1;
 }
 
-function getStore(storageKey: string): CachedEnvelope[] {
+function getStore(storageKey: string, strict = false): CachedEnvelope[] {
   const storageApi = sdk().getStorageSync;
   if (!storageApi) {
     return [];
@@ -208,7 +275,8 @@ function getStore(storageKey: string): CachedEnvelope[] {
   let storedStr: any;
   try {
     storedStr = storageApi(storageKey);
-  } catch (_e) {
+  } catch (error) {
+    if (strict) throw error;
     return [];
   }
   if (!storedStr) {

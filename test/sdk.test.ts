@@ -187,9 +187,11 @@ describe('SDK', () => {
         integrations: [eventFilters],
       });
       expect(
-        clientWithEventFilters?.getOptions().integrations.filter((integration: any) =>
-          ['EventFilters', 'InboundFilters'].includes(integration.name),
-        ),
+        clientWithEventFilters
+          ?.getOptions()
+          .integrations.filter((integration: any) =>
+            ['EventFilters', 'InboundFilters'].includes(integration.name),
+          ),
       ).toEqual([eventFilters]);
 
       const inboundFilters = inboundFiltersIntegration({ ignoreErrors: ['legacy'] });
@@ -198,9 +200,11 @@ describe('SDK', () => {
         integrations: [inboundFilters],
       });
       expect(
-        clientWithInboundFilters?.getOptions().integrations.filter((integration: any) =>
-          ['EventFilters', 'InboundFilters'].includes(integration.name),
-        ),
+        clientWithInboundFilters
+          ?.getOptions()
+          .integrations.filter((integration: any) =>
+            ['EventFilters', 'InboundFilters'].includes(integration.name),
+          ),
       ).toEqual([inboundFilters]);
     });
   });
@@ -264,6 +268,11 @@ describe('SDK', () => {
     });
 
     it('wraps custom transport with the consent gate', async () => {
+      const stored: Record<string, string> = {};
+      (global as any).wx.getStorageSync = (key: string) => stored[key];
+      (global as any).wx.setStorageSync = (key: string, value: string) => {
+        stored[key] = value;
+      };
       const send = jest.fn((_: any) => Promise.resolve({ statusCode: 200 }));
       const client = init({
         dsn: 'https://test@sentry.io/123',
@@ -283,8 +292,8 @@ describe('SDK', () => {
       setConsent(true);
       await transport?.send(afterConsent);
 
-      expect(send).toHaveBeenCalledTimes(1);
-      expect(send.mock.calls[0]?.[0]?.[0]?.event_id).toBe('after');
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(send.mock.calls.map((call) => call[0][0].event_id)).toEqual(['before', 'after']);
     });
   });
 

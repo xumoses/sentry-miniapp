@@ -1,5 +1,6 @@
-import { getCurrentScope } from '@sentry/core';
+import { getCurrentScope, getClient } from '@sentry/core';
 import type { Integration, IntegrationFn } from '@sentry/core';
+import type { MiniappOptions } from '../types';
 import { startSpan } from '@sentry/core';
 
 import {
@@ -146,7 +147,10 @@ export class PerformanceIntegration implements Integration {
 
       if (canObserveUserTiming) {
         try {
-          const systemInfo = getSystemInfo();
+          const systemInfo =
+            (getClient()?.getOptions() as MiniappOptions | undefined)?.enableSystemInfo === false
+              ? null
+              : getSystemInfo();
 
           if (systemInfo && systemInfo.platform === 'devtools') {
             canObserveUserTiming = false;
