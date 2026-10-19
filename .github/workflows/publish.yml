@@ -57,4 +57,4 @@ jobs:
 
       # 通过 npm Trusted Publishing（OIDC）发布，不再使用 NPM_TOKEN
       - name: Publish to NPM
-        run: npm publish --access public --provenance --tag beta
+        run: npm publish --access public --provenance --tag beta --loglevel verbose
