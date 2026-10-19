@@ -27,8 +27,12 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22.x'
+          node-version: '24.x'
           registry-url: 'https://registry.npmjs.org'
+
+      # Trusted Publishing（OIDC）要求 npm >= 11.5.1
+      - name: Upgrade npm
+        run: npm install -g npm@^11.5.1
 
       - name: Enable Corepack
         run: corepack enable
@@ -51,7 +55,6 @@ jobs:
       - name: Build Project
         run: yarn run build
 
+      # 通过 npm Trusted Publishing（OIDC）发布，不再使用 NPM_TOKEN
       - name: Publish to NPM
         run: npm publish --access public --provenance --tag beta
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
