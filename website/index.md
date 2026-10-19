@@ -3,21 +3,21 @@ layout: home
 
 hero:
   name: sentry-miniapp
-  text: 跨端小程序 Sentry SDK
-  tagline: 微信 / 支付宝 / 字节跳动 / 钉钉 / QQ / 百度 / 快手 + Taro / uni-app —— 异常、性能与网络监控开箱即用
+  text: 已弃用，请使用 sentry-taro
+  tagline: 本仓库及 @xumoses/sentry-miniapp 已停止维护；后续开发请前往 @xumoses/sentry-taro。旧文档仅供参考。
   image:
     src: /logo.png
     alt: sentry-miniapp
   actions:
     - theme: brand
-      text: 5 分钟接入
-      link: /guide/getting-started
+      text: 前往 sentry-taro
+      link: https://sentry-taro.pages.dev/guide/getting-started
     - theme: alt
-      text: 它适合我吗？
-      link: /guide/when-to-use
+      text: AI 辅助迁移 Skill
+      link: https://github.com/xumoses/sentry-taro/tree/main/skills/sentry-taro
     - theme: alt
       text: GitHub
-      link: https://github.com/lizhiyao/sentry-miniapp
+      link: https://github.com/xumoses/sentry-taro
 
 features:
   - icon: 🌐
@@ -40,7 +40,17 @@ features:
     details: 微信 / 抖音小游戏冷启动首帧耗时、帧率 / 卡顿（FPS / jank）监控，性能独立上报进 Performance 页。
 ---
 
-> ✅ 已收录 [Sentry 官方文档](https://docs.sentry.io/platforms/#sdks-supported-by-our-community) 的 community SDK 列表 · 7 大平台 + Taro / uni-app · 100% 测试覆盖 · 持续活跃维护
+::: warning 已弃用（Deprecated）
+本仓库及 `@xumoses/sentry-miniapp` 已停止维护，请使用 [@xumoses/sentry-taro](https://www.npmjs.com/package/@xumoses/sentry-taro)；参见[新仓库](https://github.com/xumoses/sentry-taro)和[接入文档](https://sentry-taro.pages.dev/guide/getting-started)。新 SDK 面向 **Taro React 微信小程序**，迁移前请核对支持范围，不能直接视为旧 SDK 所有平台的替代品。
+
+可安装 [sentry-taro Agent Skill](https://github.com/xumoses/sentry-taro/tree/main/skills/sentry-taro)，辅助接入或旧包迁移：
+
+```bash
+npx skills add https://github.com/xumoses/sentry-taro --skill sentry-taro
+```
+
+以下文档和示例仅作为旧版本参考。
+:::
 
 ## 按你的场景接入
 

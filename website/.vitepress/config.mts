@@ -5,9 +5,9 @@ const GITHUB = 'https://github.com/lizhiyao/sentry-miniapp';
 // https://vitepress.dev/reference/site-config
 export default defineConfig({
   lang: 'zh-CN',
-  title: 'sentry-miniapp',
+  title: 'sentry-miniapp（已弃用）',
   description:
-    '跨端小程序 Sentry SDK — 微信 / 支付宝 / 字节跳动 / 钉钉 / QQ / 百度 / 快手 + Taro / uni-app，异常、性能与网络监控开箱即用。',
+    '本项目已弃用，请使用 @xumoses/sentry-taro。可通过 sentry-taro Agent Skill 辅助接入或迁移。',
   base: '/', // Cloudflare Pages 部署在根域，无子路径
   lastUpdated: true,
   cleanUrls: true,
@@ -18,6 +18,7 @@ export default defineConfig({
     logo: '/logo.png',
 
     nav: [
+      { text: '已弃用：前往 sentry-taro', link: 'https://sentry-taro.pages.dev/' },
       { text: '指南', link: '/guide/getting-started', activeMatch: '/guide/' },
       { text: '常见问题', link: '/guide/faq' },
       { text: 'npm', link: 'https://www.npmjs.com/package/@xumoses/sentry-miniapp' },
@@ -71,7 +72,7 @@ export default defineConfig({
     },
 
     footer: {
-      message: '基于 @sentry/core 的跨端小程序 SDK · MIT Licensed',
+      message: '本项目已弃用，请使用 <a href="https://sentry-taro.pages.dev/">@xumoses/sentry-taro</a> · MIT Licensed',
       copyright: `Copyright © 2019-present <a href="${GITHUB}">sentry-miniapp</a>`,
     },
   },
